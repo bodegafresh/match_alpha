@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
@@ -14,6 +15,7 @@ from app.db.repositories.observability import ObservabilityRepository
 from app.jobs.registry import run_registered_job
 
 ORCHESTRATOR_VERSION = "canonical_ingestion_v1"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -158,6 +160,7 @@ class JobOrchestrator:
                     continue
 
                 try:
+                    logger.info("orchestrated job starting job=%s orchestrator=%s window=%s", item.name, orchestration_name, window)
                     result = await run_registered_job(
                         item.name,
                         self.conn,
@@ -176,15 +179,28 @@ class JobOrchestrator:
                             break
                     else:
                         executed.append(item.name)
-                except Exception as exc:
-                    failed.append({"job": item.name, "reason": type(exc).__name__})
-                    await self.obs.data_quality_event(
-                        "ANALYTICS",
-                        "ERROR",
-                        "ORCHESTRATED_JOB_ERROR",
-                        f"{item.name}: {exc}",
-                        {"job_name": item.name, "orchestrator": orchestration_name, "window": window},
+                    logger.info(
+                        "orchestrated job finished job=%s status=%s records=%s orchestrator=%s window=%s",
+                        item.name,
+                        status,
+                        records,
+                        orchestration_name,
+                        window,
                     )
+                except Exception as exc:
+                    error_payload = self._error_payload(item.name, exc)
+                    failed.append(error_payload)
+                    logger.exception("orchestrated job failed job=%s orchestrator=%s window=%s", item.name, orchestration_name, window)
+                    try:
+                        await self.obs.data_quality_event(
+                            "ANALYTICS",
+                            "ERROR",
+                            "ORCHESTRATED_JOB_ERROR",
+                            f"{item.name}: {exc}",
+                            {"job_name": item.name, "orchestrator": orchestration_name, "window": window, "error": error_payload},
+                        )
+                    except Exception:
+                        logger.exception("failed to record data_quality_event for job=%s", item.name)
                     if item.critical:
                         break
 
@@ -268,3 +284,11 @@ class JobOrchestrator:
             if row.get(key):
                 row[key] = iso_utc(row[key])
         return row
+
+    def _error_payload(self, job_name: str, exc: Exception) -> dict[str, str]:
+        detail = str(exc)
+        return {
+            "job": job_name,
+            "reason": type(exc).__name__,
+            "detail": detail[:1000],
+        }

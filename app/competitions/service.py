@@ -385,7 +385,7 @@ async def worldcup_live_refresh(conn: AsyncConnection, competition: str | None =
 
 async def _season_row(conn: AsyncConnection, slug: str) -> dict[str, Any]:
     result = await conn.execute(
-        text("select competition_season_id::text, metadata from competition_seasons where slug = :slug"),
+        text("select competition_season_id::text, slug, metadata from competition_seasons where slug = :slug"),
         {"slug": slug},
     )
     row = result.first()
