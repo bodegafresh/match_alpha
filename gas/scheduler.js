@@ -141,6 +141,25 @@ function checkBackendHealth() {
 }
 
 /**
+ * forceDailyOrchestration — uso manual desde el editor GAS.
+ * Omite los guards de hora UTC e idempotencia diaria.
+ * Úsalo para forzar la actualización de hoy/ayer fuera del horario configurado.
+ */
+function forceDailyOrchestration() {
+  var result = backendFetch_('/api/v1/jobs/orchestrate/daily', {
+    method: 'post',
+    payload: { source: 'gas_force_daily' }
+  });
+
+  // Resetear el guard de idempotencia para que el trigger automático
+  // también pueda correr en su próxima ventana horaria
+  var props = PropertiesService.getScriptProperties();
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.DAILY_RAN_DATE);
+
+  return logBackendCronResult_('forceDailyOrchestration', result);
+}
+
+/**
  * checkBackendLatestStatus — mantener por compatibilidad con el script original.
  */
 function checkBackendLatestStatus() {
