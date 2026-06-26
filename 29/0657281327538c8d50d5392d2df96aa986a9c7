@@ -1,0 +1,53 @@
+app/jobs/orchestrator.py
+  s_acedc47d393e24::t_b92aa808cc197a 230-232,235,237-264,266-270
+  s_acedc47d393e24::t_2ec8e5b32e9a74 60
+  s_acedc47d393e24::t_48eaa234265e0c 74,82
+app/db/repositories/published.py
+  s_acedc47d393e24::t_e4fbab3a2c117f 9-92,103-108,112,120,130-153,191-194,197-200,203-206,209-211
+app/api/routes/web.py
+  s_acedc47d393e24::t_e313b7933badbb 436
+  s_acedc47d393e24::t_cd8e89b8a3a167 317
+  s_acedc47d393e24::t_098231e917752d 465
+  s_acedc47d393e24::t_796e0ea62469db 412
+  s_acedc47d393e24::t_5a73ba62c01c8b 454
+supabase/migrations/009_betting_decisions_unique.sql
+  s_acedc47d393e24::t_db4ccc2d086a3d 1-6
+app/api/routes/jobs.py
+  s_acedc47d393e24::t_c9ad8902dee155 4,8,48-134
+  s_acedc47d393e24::t_1717eafb3fc82b 135-136
+gas/scheduler.js
+  s_acedc47d393e24::t_9f085d98661495 1-197
+app/db/repositories/betting.py
+  s_acedc47d393e24::t_108c60586a6ddc 9,37-42,46,60-70
+app/jobs/registry.py
+  s_acedc47d393e24::t_52a3c2af13b675 84-98
+  s_acedc47d393e24::t_1cb30a188d3524 109
+app/core/freshness.py
+  s_acedc47d393e24::t_ceb280f81f9f30 1-52
+app/clients/base.py
+  s_acedc47d393e24::t_04e6a270491ab5 1,18-39
+app/competitions/service.py
+  s_acedc47d393e24::t_f738a91b638a49 454-463
+  s_acedc47d393e24::t_b9c95cf14c98d0 589-601
+  s_acedc47d393e24::t_1c3ee7d01fdcfc 22
+supabase/migrations/010_pipeline_runs_idempotency.sql
+  s_acedc47d393e24::t_c270ccf82d0b7d 1-14
+supabase/migrations/011_performance_indexes.sql
+  s_acedc47d393e24::t_97ee9e2fda8f1e 1-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "290657281327538c8d50d5392d2df96aa986a9c7",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
