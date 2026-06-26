@@ -1,0 +1,3 @@
+class NewsClient:
+    source = "NEWS"
+
