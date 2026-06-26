@@ -1,0 +1,19 @@
+supabase/migrations/015_betting_decisions_extensions.sql
+  s_acedc47d393e24::t_e0f0d18703c8f4 15,19-21,23-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "90f5bfcbf4e06fca19cd8f754fc6f32adf778281",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
