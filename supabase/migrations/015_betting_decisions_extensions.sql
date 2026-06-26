@@ -12,13 +12,18 @@ alter table betting_decisions
     check (clv_source in ('CLOSING', 'LAST_AVAILABLE') or clv_source is null),
   add column if not exists block_reasons jsonb;
 
--- Add PAPER_ONLY to decision_status enum (idempotent via DO block)
+-- Add PAPER_ONLY to decision_status enum (idempotent)
 do $$
 begin
   if not exists (
-    select 1 from pg_enum
-    where enumtypid = 'decision_status'::regtype and enumlabel = 'PAPER_ONLY'
+    select 1 from pg_type t
+    join pg_enum e on e.enumtypid = t.oid
+    where t.typname = 'decision_status' and e.enumlabel = 'PAPER_ONLY'
   ) then
-    alter type decision_status add value 'PAPER_ONLY';
+    if exists (select 1 from pg_type where typname = 'decision_status') then
+      alter type decision_status add value 'PAPER_ONLY';
+    else
+      create type decision_status as enum ('BETTABLE', 'NO_EDGE', 'BLOCKED', 'PAPER_ONLY');
+    end if;
   end if;
 end $$;
