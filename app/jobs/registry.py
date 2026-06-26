@@ -80,6 +80,8 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "worldcup_daily_refresh",
         "worldcup_live_refresh",
         "odds_refresh",
+        "results_settlement",
+        "standings_refresh",
         "feature_snapshot_build",
         "dataset_builder",
         "model_recompute",

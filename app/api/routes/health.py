@@ -2,11 +2,12 @@ import json
 from asyncio import TimeoutError as AsyncTimeoutError
 from time import perf_counter
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings
+from app.core.security import require_internal_key
 from app.core.time import iso_utc
 from app.db.session import engine
 
@@ -14,18 +15,77 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
-async def health() -> dict:
+async def health(_: None = Depends(require_internal_key)) -> dict:
     settings = get_settings()
     return {
+        "status": "ok",
         "service": settings.app_name,
-        "status": "OK",
-        "supabase": "configured" if settings.database_url else "not_configured",
-        "checked_at": iso_utc(),
+        "timestamp": iso_utc(),
+    }
+
+
+@router.get("/health/deep")
+async def deep_health(_: None = Depends(require_internal_key)) -> dict:
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "error",
+                "backend": "ok",
+                "database": "not_configured",
+                "timestamp": iso_utc(),
+            },
+        )
+
+    started = perf_counter()
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("select 1"))
+            row = await conn.execute(
+                text(
+                    """
+                    select job_name, status, started_at, finished_at, records_processed
+                    from pipeline_runs
+                    order by started_at desc
+                    limit 1
+                    """
+                )
+            )
+            latest = row.first()
+            latency_ms = int((perf_counter() - started) * 1000)
+    except (AsyncTimeoutError, TimeoutError, OSError, SQLAlchemyError) as exc:
+        latency_ms = int((perf_counter() - started) * 1000)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "error",
+                "backend": "ok",
+                "database": "error",
+                "error_type": type(exc).__name__,
+                "latency_ms": latency_ms,
+                "timestamp": iso_utc(),
+            },
+        ) from exc
+
+    last_pipeline_run = None
+    if latest:
+        data = dict(latest._mapping)
+        for key in ("started_at", "finished_at"):
+            if data.get(key):
+                data[key] = iso_utc(data[key])
+        last_pipeline_run = data
+    return {
+        "status": "ok",
+        "backend": "ok",
+        "database": "ok",
+        "database_latency_ms": latency_ms,
+        "last_pipeline_run": last_pipeline_run,
+        "timestamp": iso_utc(),
     }
 
 
 @router.get("/health/supabase")
-async def supabase_health() -> dict:
+async def supabase_health(_: None = Depends(require_internal_key)) -> dict:
     if engine is None:
         raise HTTPException(
             status_code=503,
