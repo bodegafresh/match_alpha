@@ -5,7 +5,7 @@
  * GAS solo despierta y orquesta el backend — no ingesta datos ni toca Supabase.
  *
  * Fixes del audit aplicados:
- *   - Keepalive cada 14 min (Render Free duerme a los 15 min de inactividad)
+ *   - Keepalive cada 10 min (Render Free duerme a los 15 min; GAS permite 1/5/10/15/30)
  *   - Live orchestration cada 15 min (antes era 30)
  *   - Guard de idempotencia diario en GAS (además del guard del backend)
  *   - Live orchestration solo corre dentro de la ventana WC2026
@@ -46,8 +46,9 @@ var MATCH_ALPHA_CRON_PROPS = {
 // ─── FUNCIONES PÚBLICAS (adjuntar como triggers) ──────────────────────────────
 
 /**
- * pingBackendKeepAlive — configurar cada 14 minutos.
- * Mantiene el backend de Render Free despierto (se duerme a los 15 min).
+ * pingBackendKeepAlive — configurar cada 10 minutos.
+ * Mantiene el backend de Render Free despierto (se duerme a los 15 min de inactividad).
+ * GAS solo acepta 1, 5, 10, 15 o 30 — usamos 10 para tener margen seguro.
  */
 function pingBackendKeepAlive() {
   var config = getBackendCronConfig_();
@@ -162,9 +163,11 @@ function checkBackendLatestStatus() {
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();
 
+  // GAS solo acepta: 1, 5, 10, 15, 30 minutos.
+  // Render Free duerme a los 15 min de inactividad → usamos 10 min con margen.
   var keepalive = ScriptApp.newTrigger('pingBackendKeepAlive')
     .timeBased()
-    .everyMinutes(14)
+    .everyMinutes(10)
     .create();
 
   var daily = ScriptApp.newTrigger('runDailyBackendOrchestration')
