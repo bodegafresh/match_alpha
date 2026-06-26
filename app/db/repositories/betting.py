@@ -14,6 +14,9 @@ class BettingRepository(Repository):
               p.competition_season_id::text,
               p.match_id::text,
               p.calibrated_probability,
+              p.raw_probability,
+              p.prediction_status::text,
+              p.confidence_score,
               p.market_id::text,
               p.selection_id::text,
               p.line,
@@ -32,7 +35,7 @@ class BettingRepository(Repository):
              and coalesce(os.line, -999999) = coalesce(p.line, -999999)
             left join competition_status cs_status
               on cs_status.competition_season_id = p.competition_season_id
-            where p.calibrated_probability is not null
+            where (p.calibrated_probability is not null or p.raw_probability is not null)
               and os.captured_at < m.kickoff_at
               and not exists (
                 select 1 from betting_decisions bd
@@ -44,24 +47,26 @@ class BettingRepository(Repository):
 
     async def insert_decision(self, row: dict[str, Any]) -> str:
         """Upserts a betting decision. Safe to call multiple times for the same candidate."""
+        block_reasons = row.get("block_reasons") or []
         result = await self.fetch_one(
             """
             insert into betting_decisions (
               competition_season_id, match_id, prediction_id, odds_snapshot_id,
-              decision_status, risk_level, block_reason, calibrated_probability_used,
+              decision_status, risk_level, block_reason, block_reasons, calibrated_probability_used,
               market_probability, edge, ev, kelly_fraction, stake_fraction, payload
             )
             values (
               :competition_season_id, :match_id, :prediction_id, :odds_snapshot_id,
-              cast(:decision_status as betting_decision_status), cast(:risk_level as risk_level),
-              :block_reason, :calibrated_probability_used, :market_probability, :edge, :ev,
-              :kelly_fraction, :stake_fraction, cast(:payload as jsonb)
+              cast(:decision_status as decision_status), cast(:risk_level as risk_level),
+              :block_reason, cast(:block_reasons as jsonb), :calibrated_probability_used,
+              :market_probability, :edge, :ev, :kelly_fraction, :stake_fraction, cast(:payload as jsonb)
             )
             on conflict (prediction_id, odds_snapshot_id)
             do update set
               decision_status = excluded.decision_status,
               risk_level = excluded.risk_level,
               block_reason = excluded.block_reason,
+              block_reasons = excluded.block_reasons,
               edge = excluded.edge,
               ev = excluded.ev,
               kelly_fraction = excluded.kelly_fraction,
@@ -70,6 +75,11 @@ class BettingRepository(Repository):
               updated_at = now()
             returning betting_decision_id::text
             """,
-            {**row, "payload": json.dumps(row.get("payload", {}))},
+            {
+                **row,
+                "block_reason": block_reasons[0] if block_reasons else None,
+                "block_reasons": json.dumps(block_reasons),
+                "payload": json.dumps(row.get("payload", {})),
+            },
         )
         return result["betting_decision_id"]

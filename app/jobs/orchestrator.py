@@ -51,13 +51,17 @@ class JobOrchestrator:
         context = await self._build_context()
         plan = [
             OrchestratedJob("worldcup_daily_refresh", critical=True),
-            OrchestratedJob("results_settlement", requires_finished_matches=True),
             OrchestratedJob("standings_refresh"),
             OrchestratedJob("odds_refresh", requires_upcoming_matches=True),
-            OrchestratedJob("model_recompute", requires_finished_matches=True),
+            OrchestratedJob("results_settlement", requires_finished_matches=True),
+            OrchestratedJob("elo_ratings_update", requires_finished_matches=True),
+            OrchestratedJob("feature_snapshot_build", requires_upcoming_matches=True),
+            OrchestratedJob("model_recompute", requires_upcoming_matches=True),
             OrchestratedJob("ev_decision", requires_predictions=True, requires_odds=True),
-            OrchestratedJob("calibration_recompute", requires_finished_matches=True),
             OrchestratedJob("pipeline_cleanup"),
+            # Phase 2 (uncomment when calibration pipeline is ready):
+            # OrchestratedJob("calibration_recompute", requires_finished_matches=True),
+            # OrchestratedJob("clv_compute", requires_finished_matches=True),
         ]
         return await self._run_plan("daily", plan, context)
 
