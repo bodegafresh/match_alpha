@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -14,12 +17,44 @@ from app.clients.sportmonks_client import SportmonksClient
 from app.competitions.catalog import CompetitionCatalogEntry, get_catalog_entry, supported_competitions
 from app.core.config import get_settings
 from app.core.hashing import sha256_json
-from app.core.time import iso_utc
+from app.core.time import iso_utc, utc_now
 from app.normalization.competition_format import get_format_normalizer
 
 
 def _json(value: dict[str, Any] | list[Any]) -> str:
     return json.dumps(value, default=str, ensure_ascii=False)
+
+
+TEAM_ALIASES = {
+    "alemania": "germany",
+    "costa de marfil": "cote divoire",
+    "cote divoire": "cote divoire",
+    "cote d ivoire": "cote divoire",
+    "ee uu": "united states",
+    "estados unidos": "united states",
+    "japon": "japan",
+    "paises bajos": "netherlands",
+    "suecia": "sweden",
+    "tunez": "tunisia",
+    "turquia": "turkey",
+}
+
+
+def _normalize_name(value: Any) -> str:
+    text_value = unicodedata.normalize("NFD", str(value or ""))
+    text_value = "".join(ch for ch in text_value if unicodedata.category(ch) != "Mn")
+    text_value = text_value.replace("&", " and ")
+    text_value = re.sub(r"[^a-zA-Z0-9]+", " ", text_value).strip().lower()
+    text_value = re.sub(r"\s+", " ", text_value)
+    return TEAM_ALIASES.get(text_value, text_value)
+
+
+def _slug(value: Any) -> str:
+    return _normalize_name(value).replace(" ", "-")
+
+
+def _date_ymd(value: str | None) -> str:
+    return str(value or "")[:10]
 
 
 async def seed_competition_catalog(conn: AsyncConnection, competition: str | None = None) -> dict[str, Any]:
@@ -288,6 +323,57 @@ async def sync_competition_fixtures(conn: AsyncConnection, competition: str | No
     }
 
 
+async def worldcup_daily_refresh(conn: AsyncConnection, competition: str | None = None) -> dict[str, Any]:
+    settings = get_settings()
+    entry = get_catalog_entry(competition or settings.default_season_slug)
+    await seed_competition_catalog(conn, entry.slug)
+    season = await _season_row(conn, entry.slug)
+    dates = [(utc_now().date() + timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)]
+    results: list[dict[str, Any]] = []
+    records = 0
+
+    espn_result = await _sync_espn_scoreboard_window(conn, entry, season, dates)
+    results.append(espn_result)
+    records += int(espn_result.get("records_processed") or 0)
+
+    if settings.football_data_token:
+        football_data_result = await _sync_football_data_matches(conn, entry, season)
+        results.append(football_data_result)
+        records += int(football_data_result.get("records_processed") or 0)
+
+    status = "OK" if any(item.get("status") == "OK" for item in results) else "WARN"
+    payload = {
+        "competition": entry.slug,
+        "window_dates": dates,
+        "results": results,
+        "generated_at": iso_utc(),
+    }
+    await _merge_season_metadata(conn, season["competition_season_id"], {"last_daily_refresh": payload})
+    return {
+        "status": status,
+        "job_name": "worldcup_daily_refresh",
+        "records_processed": records,
+        **payload,
+    }
+
+
+async def worldcup_live_refresh(conn: AsyncConnection, competition: str | None = None) -> dict[str, Any]:
+    settings = get_settings()
+    entry = get_catalog_entry(competition or settings.default_season_slug)
+    await seed_competition_catalog(conn, entry.slug)
+    season = await _season_row(conn, entry.slug)
+    today = utc_now().date().isoformat()
+    result = await _sync_espn_scoreboard_window(conn, entry, season, [today])
+    return {
+        "status": result.get("status", "WARN"),
+        "job_name": "worldcup_live_refresh",
+        "records_processed": int(result.get("records_processed") or 0),
+        "date": today,
+        "result": result,
+        "generated_at": iso_utc(),
+    }
+
+
 async def _season_row(conn: AsyncConnection, slug: str) -> dict[str, Any]:
     result = await conn.execute(
         text("select competition_season_id::text, metadata from competition_seasons where slug = :slug"),
@@ -332,6 +418,374 @@ async def _insert_raw_payload(conn: AsyncConnection, source: str, entity_id: str
             "payload": _json(payload),
         },
     )
+
+
+async def _sync_espn_scoreboard_window(
+    conn: AsyncConnection,
+    entry: CompetitionCatalogEntry,
+    season: dict[str, Any],
+    dates: list[str],
+) -> dict[str, Any]:
+    updated = 0
+    raw_events = 0
+    errors: list[dict[str, str]] = []
+    client = EspnClient()
+    for date in dates:
+        try:
+            payload = await client.scoreboard(date.replace("-", ""))
+        except (httpx.HTTPError, TimeoutError, OSError) as exc:
+            errors.append({"date": date, "error": type(exc).__name__})
+            continue
+        await _insert_raw_payload(conn, "ESPN", f"{entry.slug}:scoreboard:{date}", payload)
+        for event in payload.get("events") or []:
+            raw_events += 1
+            await _insert_raw_payload(conn, "ESPN", f"event:{event.get('id')}", event)
+            if await _promote_normalized_match(conn, season, _normalize_espn_event(event)):
+                updated += 1
+    return {
+        "status": "OK" if raw_events else "WARN",
+        "source": "ESPN",
+        "records_processed": updated,
+        "raw_events": raw_events,
+        "errors": errors,
+    }
+
+
+async def _sync_football_data_matches(
+    conn: AsyncConnection,
+    entry: CompetitionCatalogEntry,
+    season: dict[str, Any],
+) -> dict[str, Any]:
+    code = entry.source.external_ids.get("FOOTBALL_DATA")
+    if not code:
+        return {"status": "WARN", "source": "FOOTBALL_DATA", "records_processed": 0, "reason": "NO_EXTERNAL_ID"}
+    try:
+        payload = await FootballDataClient().competition_matches(code, entry.season_label[:4])
+    except (httpx.HTTPError, TimeoutError, OSError) as exc:
+        return {"status": "WARN", "source": "FOOTBALL_DATA", "records_processed": 0, "error": type(exc).__name__}
+
+    await _insert_raw_payload(conn, "FOOTBALL_DATA", f"{entry.slug}:matches", payload)
+    updated = 0
+    matches = payload.get("matches") or []
+    for match in matches:
+        await _insert_raw_payload(conn, "FOOTBALL_DATA", f"match:{match.get('id')}", match)
+        normalized = _normalize_football_data_match(match)
+        if normalized.get("kickoff_at") and _date_ymd(normalized["kickoff_at"]) < (utc_now().date() - timedelta(days=2)).isoformat():
+            continue
+        if await _promote_normalized_match(conn, season, normalized):
+            updated += 1
+    return {
+        "status": "OK" if matches else "WARN",
+        "source": "FOOTBALL_DATA",
+        "records_processed": updated,
+        "raw_matches": len(matches),
+    }
+
+
+def _normalize_espn_event(event: dict[str, Any]) -> dict[str, Any]:
+    competition = (event.get("competitions") or [{}])[0] or {}
+    competitors = competition.get("competitors") or []
+    home = next((item for item in competitors if str(item.get("homeAway", "")).lower() == "home"), competitors[0] if competitors else {})
+    away = next((item for item in competitors if str(item.get("homeAway", "")).lower() == "away"), competitors[1] if len(competitors) > 1 else {})
+    status_type = ((competition.get("status") or event.get("status") or {}).get("type")) or {}
+    venue = competition.get("venue") or {}
+    address = venue.get("address") or {}
+    stage_text = (
+        ((event.get("seasonType") or {}).get("name"))
+        or ((event.get("group") or {}).get("name"))
+        or (((competition.get("notes") or [{}])[0] or {}).get("headline"))
+        or event.get("name")
+        or ""
+    )
+    group_text = ((event.get("group") or {}).get("name")) or ((event.get("group") or {}).get("shortName")) or stage_text
+    return {
+        "source": "ESPN",
+        "source_match_id": str(event.get("id") or ""),
+        "source_match_name": event.get("name") or event.get("shortName") or "",
+        "kickoff_at": event.get("date") or competition.get("date"),
+        "status": _normalize_espn_status(status_type),
+        "stage_code": _normalize_stage_code(stage_text),
+        "group_code": _normalize_group_code(group_text),
+        "home": _normalize_espn_team(home),
+        "away": _normalize_espn_team(away),
+        "home_score": _score(home.get("score")),
+        "away_score": _score(away.get("score")),
+        "venue": {
+            "source_venue_id": str(venue.get("id") or ""),
+            "display_name": venue.get("fullName") or venue.get("name"),
+            "city": address.get("city"),
+            "country_code": address.get("country"),
+            "timezone_name": venue.get("timeZone"),
+            "latitude": venue.get("latitude"),
+            "longitude": venue.get("longitude"),
+        }
+        if venue
+        else None,
+        "payload": event,
+    }
+
+
+def _normalize_football_data_match(match: dict[str, Any]) -> dict[str, Any]:
+    home_team = match.get("homeTeam") or {}
+    away_team = match.get("awayTeam") or {}
+    score = (match.get("score") or {}).get("fullTime") or {}
+    return {
+        "source": "FOOTBALL_DATA",
+        "source_match_id": str(match.get("id") or ""),
+        "source_match_name": f"{home_team.get('name', '')} vs {away_team.get('name', '')}",
+        "kickoff_at": match.get("utcDate"),
+        "status": _normalize_football_data_status(match.get("status")),
+        "stage_code": _normalize_stage_code(match.get("stage") or match.get("group")),
+        "group_code": _normalize_group_code(match.get("group")),
+        "home": _normalize_football_data_team(home_team),
+        "away": _normalize_football_data_team(away_team),
+        "home_score": score.get("home"),
+        "away_score": score.get("away"),
+        "venue": None,
+        "payload": match,
+    }
+
+
+async def _promote_normalized_match(conn: AsyncConnection, season: dict[str, Any], normalized: dict[str, Any]) -> bool:
+    if not normalized.get("kickoff_at") or not normalized.get("home") or not normalized.get("away"):
+        return False
+    match = await _find_existing_match(conn, season, normalized)
+    if not match:
+        return False
+    home_score = _score(normalized.get("home_score"))
+    away_score = _score(normalized.get("away_score"))
+    home_team_id = match.get("home_team_id")
+    away_team_id = match.get("away_team_id")
+    winner_team_id = _winner_team_id(home_team_id, away_team_id, home_score, away_score, normalized.get("status"))
+    await conn.execute(
+        text(
+            """
+            update matches
+            set kickoff_at = cast(:kickoff_at as timestamptz),
+                status = cast(:status as match_status),
+                home_score = :home_score,
+                away_score = :away_score,
+                winner_team_id = cast(:winner_team_id as uuid),
+                metadata = metadata || cast(:metadata as jsonb),
+                updated_at = now()
+            where match_id = cast(:match_id as uuid)
+            """
+        ),
+        {
+            "match_id": match["match_id"],
+            "kickoff_at": normalized["kickoff_at"],
+            "status": normalized["status"],
+            "home_score": home_score,
+            "away_score": away_score,
+            "winner_team_id": winner_team_id,
+            "metadata": _json({"source": normalized["source"], "source_match_name": normalized.get("source_match_name")}),
+        },
+    )
+    await _update_participant_score(conn, match["match_id"], "HOME", home_score)
+    await _update_participant_score(conn, match["match_id"], "AWAY", away_score)
+    await _upsert_match_external_ref(conn, match["match_id"], normalized)
+    return True
+
+
+async def _find_existing_match(conn: AsyncConnection, season: dict[str, Any], normalized: dict[str, Any]) -> dict[str, Any] | None:
+    source_match_id = normalized.get("source_match_id")
+    if source_match_id:
+        row = await conn.execute(
+            text(
+                """
+                select m.match_id::text, home.team_id::text as home_team_id, away.team_id::text as away_team_id
+                from entity_external_refs ref
+                join matches m on m.match_id = ref.entity_id
+                left join match_participants home on home.match_id = m.match_id and home.side = 'HOME'
+                left join match_participants away on away.match_id = m.match_id and away.side = 'AWAY'
+                where ref.entity_type = 'MATCH'
+                  and ref.source = :source
+                  and ref.source_entity_id = :source_match_id
+                limit 1
+                """
+            ),
+            {"source": normalized["source"], "source_match_id": source_match_id},
+        )
+        found = row.first()
+        if found:
+            return dict(found._mapping)
+
+    slug = _match_slug(season["slug"], normalized)
+    row = await conn.execute(
+        text(
+            """
+            select m.match_id::text, home.team_id::text as home_team_id, away.team_id::text as away_team_id
+            from matches m
+            left join match_participants home on home.match_id = m.match_id and home.side = 'HOME'
+            left join match_participants away on away.match_id = m.match_id and away.side = 'AWAY'
+            where m.competition_season_id = cast(:season_id as uuid)
+              and m.slug = :slug
+            limit 1
+            """
+        ),
+        {"season_id": season["competition_season_id"], "slug": slug},
+    )
+    found = row.first()
+    if found:
+        return dict(found._mapping)
+
+    candidates = await conn.execute(
+        text(
+            """
+            select
+              m.match_id::text,
+              home.team_id::text as home_team_id,
+              away.team_id::text as away_team_id,
+              home_team.display_name as home_name,
+              away_team.display_name as away_name
+            from matches m
+            join match_participants home on home.match_id = m.match_id and home.side = 'HOME'
+            join match_participants away on away.match_id = m.match_id and away.side = 'AWAY'
+            join teams home_team on home_team.team_id = home.team_id
+            join teams away_team on away_team.team_id = away.team_id
+            where m.competition_season_id = cast(:season_id as uuid)
+              and date(m.kickoff_at at time zone 'UTC') = cast(:kickoff_date as date)
+            """
+        ),
+        {"season_id": season["competition_season_id"], "kickoff_date": _date_ymd(normalized["kickoff_at"])},
+    )
+    wanted_home = _normalize_name((normalized.get("home") or {}).get("display_name"))
+    wanted_away = _normalize_name((normalized.get("away") or {}).get("display_name"))
+    for candidate in candidates:
+        data = dict(candidate._mapping)
+        if _normalize_name(data.get("home_name")) == wanted_home and _normalize_name(data.get("away_name")) == wanted_away:
+            return data
+    return None
+
+
+async def _update_participant_score(conn: AsyncConnection, match_id: str, side: str, score: int | None) -> None:
+    await conn.execute(
+        text(
+            """
+            update match_participants
+            set score = :score,
+                updated_at = now()
+            where match_id = cast(:match_id as uuid)
+              and side = cast(:side as participant_side)
+            """
+        ),
+        {"match_id": match_id, "side": side, "score": score},
+    )
+
+
+async def _upsert_match_external_ref(conn: AsyncConnection, match_id: str, normalized: dict[str, Any]) -> None:
+    if not normalized.get("source_match_id"):
+        return
+    await conn.execute(
+        text(
+            """
+            insert into entity_external_refs
+              (entity_type, entity_id, source, source_entity_type, source_entity_id, source_entity_name, confidence, is_primary, payload)
+            values
+              ('MATCH', cast(:match_id as uuid), :source, 'event', :source_entity_id, :source_entity_name, 1, true, cast(:payload as jsonb))
+            on conflict (entity_type, source, source_entity_id) do update set
+              entity_id = excluded.entity_id,
+              source_entity_name = excluded.source_entity_name,
+              confidence = excluded.confidence,
+              is_primary = excluded.is_primary,
+              payload = excluded.payload,
+              updated_at = now()
+            """
+        ),
+        {
+            "match_id": match_id,
+            "source": normalized["source"],
+            "source_entity_id": normalized["source_match_id"],
+            "source_entity_name": normalized.get("source_match_name") or "",
+            "payload": _json(normalized.get("payload") or {}),
+        },
+    )
+
+
+def _normalize_espn_team(competitor: dict[str, Any]) -> dict[str, Any]:
+    team = competitor.get("team") or competitor
+    name = team.get("displayName") or team.get("name") or competitor.get("displayName") or competitor.get("name") or ""
+    return {"display_name": name, "source_team_id": str(team.get("id") or competitor.get("id") or ""), "payload": competitor}
+
+
+def _normalize_football_data_team(team: dict[str, Any]) -> dict[str, Any]:
+    return {"display_name": team.get("name") or team.get("shortName") or team.get("tla") or "", "source_team_id": str(team.get("id") or ""), "payload": team}
+
+
+def _normalize_espn_status(status_type: dict[str, Any]) -> str:
+    name = str(status_type.get("name") or status_type.get("state") or status_type.get("description") or "").upper()
+    if status_type.get("completed") or "FINAL" in name or name == "STATUS_FINAL":
+        return "FINISHED"
+    if "IN_PROGRESS" in name or "HALFTIME" in name:
+        return "LIVE"
+    if "POSTPONED" in name:
+        return "POSTPONED"
+    if "CANCELED" in name or "CANCELLED" in name:
+        return "CANCELLED"
+    return "SCHEDULED"
+
+
+def _normalize_football_data_status(status: Any) -> str:
+    value = str(status or "").upper()
+    if value == "FINISHED":
+        return "FINISHED"
+    if value in {"LIVE", "IN_PLAY", "PAUSED"}:
+        return "LIVE"
+    if value == "POSTPONED":
+        return "POSTPONED"
+    if value in {"CANCELLED", "CANCELED", "SUSPENDED"}:
+        return "CANCELLED"
+    return "SCHEDULED"
+
+
+def _normalize_stage_code(value: Any) -> str:
+    raw = _normalize_name(value)
+    if "round of 32" in raw or "last 32" in raw or "dieciseis" in raw:
+        return "ROUND_OF_32"
+    if "round of 16" in raw or "last 16" in raw or "octav" in raw:
+        return "ROUND_OF_16"
+    if "quarter" in raw or "cuarto" in raw:
+        return "QUARTER_FINAL"
+    if "semi" in raw:
+        return "SEMI_FINAL"
+    if "third" in raw or "tercer" in raw:
+        return "THIRD_PLACE"
+    if raw == "final" or " final" in raw:
+        return "FINAL"
+    return "GROUP_STAGE"
+
+
+def _normalize_group_code(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    match = re.search(r"(?:group|grupo)\s*([a-l])", raw, flags=re.IGNORECASE) or re.match(r"^([A-L])$", raw, flags=re.IGNORECASE)
+    return f"Grupo {match.group(1).upper()}" if match else None
+
+
+def _score(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _winner_team_id(home_team_id: str | None, away_team_id: str | None, home_score: int | None, away_score: int | None, status: str | None) -> str | None:
+    if status != "FINISHED" or home_score is None or away_score is None:
+        return None
+    if home_score > away_score:
+        return home_team_id
+    if away_score > home_score:
+        return away_team_id
+    return None
+
+
+def _match_slug(season_slug: str, normalized: dict[str, Any]) -> str:
+    home = (normalized.get("home") or {}).get("display_name")
+    away = (normalized.get("away") or {}).get("display_name")
+    return _slug(f"{season_slug} {_date_ymd(normalized.get('kickoff_at'))} {home} {away}")
 
 
 async def _probe_source(source: str, entry: CompetitionCatalogEntry) -> dict[str, Any]:

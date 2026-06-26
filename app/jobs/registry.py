@@ -6,7 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.config import get_settings
 from app.core.time import iso_utc
-from app.competitions.service import discover_competition_sources, seed_competition_catalog, sync_competition_fixtures
+from app.competitions.service import (
+    discover_competition_sources,
+    seed_competition_catalog,
+    sync_competition_fixtures,
+    worldcup_daily_refresh,
+    worldcup_live_refresh,
+)
 from app.db.repositories.betting import BettingRepository
 from app.db.repositories.observability import ObservabilityRepository
 from app.decision.decision_engine import evaluate_decision
@@ -67,6 +73,14 @@ async def sync_competition_fixtures_job(conn: AsyncConnection, payload: dict[str
     return await sync_competition_fixtures(conn, payload.get("competition"))
 
 
+async def worldcup_daily_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    return await worldcup_daily_refresh(conn, payload.get("competition"))
+
+
+async def worldcup_live_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    return await worldcup_live_refresh(conn, payload.get("competition"))
+
+
 async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     jobs: dict[str, JobFn] = {
@@ -75,10 +89,10 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "seed_competition_catalog": seed_competition_catalog_job,
         "discover_competition_sources": discover_competition_sources_job,
         "sync_competition_fixtures": sync_competition_fixtures_job,
+        "worldcup_daily_refresh": worldcup_daily_refresh_job,
+        "worldcup_live_refresh": worldcup_live_refresh_job,
     }
     scaffold_jobs = {
-        "worldcup_daily_refresh",
-        "worldcup_live_refresh",
         "odds_refresh",
         "results_settlement",
         "standings_refresh",

@@ -13,6 +13,8 @@ from app.core.time import iso_utc, utc_now
 from app.db.repositories.observability import ObservabilityRepository
 from app.jobs.registry import run_registered_job
 
+ORCHESTRATOR_VERSION = "canonical_ingestion_v1"
+
 
 @dataclass(frozen=True)
 class OrchestratedJob:
@@ -74,10 +76,15 @@ class JobOrchestrator:
                 where job_name = :job_name
                   and status in ('OK', 'WARN')
                   and payload ->> 'idempotency_key' = :idempotency_key
+                  and payload ->> 'orchestrator_version' = :orchestrator_version
                 limit 1
                 """
             ),
-            {"job_name": job_name, "idempotency_key": f"{job_name}:{window}"},
+            {
+                "job_name": job_name,
+                "idempotency_key": f"{job_name}:{window}",
+                "orchestrator_version": ORCHESTRATOR_VERSION,
+            },
         )
         return row.first() is None
 
@@ -128,7 +135,12 @@ class JobOrchestrator:
         window = self._window(orchestration_name)
         orchestrator_run_id = await self.obs.start_pipeline(
             f"orchestrate_{orchestration_name}",
-            {"window": window, "context": context, "idempotency_key": f"orchestrate_{orchestration_name}:{window}"},
+            {
+                "window": window,
+                "context": context,
+                "idempotency_key": f"orchestrate_{orchestration_name}:{window}",
+                "orchestrator_version": ORCHESTRATOR_VERSION,
+            },
         )
         executed: list[str] = []
         skipped: list[dict[str, str]] = []
@@ -146,7 +158,15 @@ class JobOrchestrator:
                     continue
 
                 try:
-                    result = await run_registered_job(item.name, self.conn, {"orchestrator": orchestration_name, "idempotency_key": f"{item.name}:{window}"})
+                    result = await run_registered_job(
+                        item.name,
+                        self.conn,
+                        {
+                            "orchestrator": orchestration_name,
+                            "idempotency_key": f"{item.name}:{window}",
+                            "orchestrator_version": ORCHESTRATOR_VERSION,
+                        },
+                    )
                     status = str(result.get("status", "OK")).upper()
                     records = int(result.get("records_processed") or 0)
                     records_updated += records
