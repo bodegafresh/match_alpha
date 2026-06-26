@@ -631,7 +631,7 @@ async def _promote_normalized_match(conn: AsyncConnection, season: dict[str, Any
         ),
         {
             "match_id": match["match_id"],
-            "kickoff_at": normalized["kickoff_at"],
+            "kickoff_at": _parse_iso_dt(normalized["kickoff_at"]),
             "status": normalized["status"],
             "home_score": home_score,
             "away_score": away_score,

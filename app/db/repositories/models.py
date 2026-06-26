@@ -1,10 +1,20 @@
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core.hashing import sha256_json
 from app.core.time import utc_now
 from app.db.repositories.base import Repository
 from app.models.prediction_validation import validate_prediction_payload
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 class ModelRepository(Repository):
@@ -39,7 +49,7 @@ class ModelRepository(Repository):
                 "model_id": model_id,
                 "competition_season_id": competition_season_id,
                 "market_id": market_id,
-                "prediction_as_of": prediction_as_of,
+                "prediction_as_of": _parse_dt(prediction_as_of),
                 "feature_set_version": feature_set_version,
                 "dataset_version": dataset_version,
                 "git_sha": git_sha,
@@ -66,7 +76,7 @@ class ModelRepository(Repository):
             """,
             {
                 **row,
-                "as_of": row.get("as_of") or utc_now().isoformat(),
+                "as_of": _parse_dt(row.get("as_of")) or utc_now(),
                 "flags": row.get("flags", []),
                 "payload": json.dumps(row.get("payload", {})),
             },
