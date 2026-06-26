@@ -714,7 +714,7 @@ async def _find_existing_match(conn: AsyncConnection, season: dict[str, Any], no
               and date(m.kickoff_at at time zone 'UTC') = cast(:kickoff_date as date)
             """
         ),
-        {"season_id": season["competition_season_id"], "kickoff_date": _date_ymd(normalized["kickoff_at"])},
+        {"season_id": season["competition_season_id"], "kickoff_date": _parse_iso_dt(normalized["kickoff_at"]).date()},
     )
     wanted_home = _normalize_name((normalized.get("home") or {}).get("display_name"))
     wanted_away = _normalize_name((normalized.get("away") or {}).get("display_name"))
