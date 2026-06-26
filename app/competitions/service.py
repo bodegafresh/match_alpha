@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import unicodedata
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 
 def _json(value: dict[str, Any] | list[Any]) -> str:
     return json.dumps(value, default=str, ensure_ascii=False)
+
+
+def _parse_iso_dt(value: Any) -> datetime | None:
+    """Parses an ISO 8601 string to an aware datetime. asyncpg requires datetime objects, not strings."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 TEAM_ALIASES = {
@@ -151,8 +161,8 @@ async def _upsert_season(
             "competition_id": competition_id,
             "slug": entry.slug,
             "season_label": entry.season_label,
-            "starts_at": entry.starts_at,
-            "ends_at": entry.ends_at,
+            "starts_at": _parse_iso_dt(entry.starts_at),
+            "ends_at": _parse_iso_dt(entry.ends_at),
             "timezone_name": entry.timezone_name,
             "format_code": entry.format_code,
             "metadata": _json(metadata),
