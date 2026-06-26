@@ -1,0 +1,66 @@
+app/decision/market_context.py
+  s_acedc47d393e24::t_8ea33ce6a3b7ea 1-113
+supabase/migrations/014_prediction_status_confidence.sql
+  s_acedc47d393e24::t_619a82de43c9d8 1-28
+app/features/calculators/team_strength.py
+  s_acedc47d393e24::t_61c288e4f03301 1-119
+supabase/migrations/013_feature_snapshots_hybrid.sql
+  s_acedc47d393e24::t_d274ab6807ae5d 1-34
+app/feedback/settlement/resolvers/btts.py
+  s_acedc47d393e24::t_7ab363de0b177a 1-11
+app/feedback/settlement/resolver.py
+  s_acedc47d393e24::t_0f3738c4a583f0 1-51
+app/decision/confidence_scorer.py
+  s_acedc47d393e24::t_059d017953d6fa 1-56
+app/jobs/orchestrator.py
+  s_acedc47d393e24::t_af40c9c83fc0ec 56-59,62-64
+app/decision/decision_engine.py
+  s_acedc47d393e24::t_2104f6ae9c51fb 1-3,9-16,18-24,28-29,31-62,65,68-69,71-88,90-94,98,104,114-117,119-122,124,127-128
+app/feedback/settlement/resolvers/over_under.py
+  s_acedc47d393e24::t_69204cf88d6c70 1-16
+app/db/repositories/betting.py
+  s_acedc47d393e24::t_cd931198080f7e 50,55,60-62,69,78-83
+  s_acedc47d393e24::t_e3c83cdd595bf2 17-19,38
+app/feedback/settlement_service.py
+  s_acedc47d393e24::t_7ba88489e30557 1-121
+app/models/poisson_predictor.py
+  s_acedc47d393e24::t_7d226c5fdea97f 1-286
+supabase/migrations/016_rating_type_constraint.sql
+  s_acedc47d393e24::t_389956ecdb637b 1-27
+supabase/migrations/015_betting_decisions_extensions.sql
+  s_acedc47d393e24::t_d362087814fd7a 1-24
+supabase/migrations/018_lineup_uncertainty_snapshots.sql
+  s_acedc47d393e24::t_68aeb40d417e02 1-25
+app/features/snapshot_builder.py
+  s_acedc47d393e24::t_7fe291272f53db 1-14,17-19,21-247,249-259,261,263,266-292,295-318
+app/jobs/registry.py
+  s_acedc47d393e24::t_bec04118e6c0fe 91-481
+  s_acedc47d393e24::t_5062c6c3b5ddf6 508-514
+  s_acedc47d393e24::t_31881b5a5df035 8,19-25
+app/features/calculators/ratings.py
+  s_acedc47d393e24::t_66259f7705c69b 1-267
+app/features/calculators/match_context.py
+  s_acedc47d393e24::t_3a97ae7299df65 1-51
+supabase/migrations/017_competition_context_snapshots.sql
+  s_acedc47d393e24::t_3c2ba964fd38b1 1-22
+supabase/migrations/012_matches_elo_processed.sql
+  s_acedc47d393e24::t_33427dcd58f7fb 1-10
+app/feedback/settlement/resolvers/one_x_two.py
+  s_acedc47d393e24::t_2144eafe4ec0b5 1-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "2657cba0ea8f3b9972accd42b8a7d0182a7a4b5a",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
