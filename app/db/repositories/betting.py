@@ -6,6 +6,7 @@ from app.db.repositories.base import Repository
 
 class BettingRepository(Repository):
     async def eligible_prediction_odds(self) -> list[dict[str, Any]]:
+        """Returns prediction+odds candidates that don't yet have a betting decision."""
         return await self.fetch_all(
             """
             select
@@ -33,10 +34,16 @@ class BettingRepository(Repository):
               on cs_status.competition_season_id = p.competition_season_id
             where p.calibrated_probability is not null
               and os.captured_at < m.kickoff_at
-            """
+              and not exists (
+                select 1 from betting_decisions bd
+                where bd.prediction_id = p.prediction_id
+                  and bd.odds_snapshot_id = os.odds_snapshot_id
+              )
+            """,
         )
 
     async def insert_decision(self, row: dict[str, Any]) -> str:
+        """Upserts a betting decision. Safe to call multiple times for the same candidate."""
         result = await self.fetch_one(
             """
             insert into betting_decisions (
@@ -50,6 +57,17 @@ class BettingRepository(Repository):
               :block_reason, :calibrated_probability_used, :market_probability, :edge, :ev,
               :kelly_fraction, :stake_fraction, cast(:payload as jsonb)
             )
+            on conflict (prediction_id, odds_snapshot_id)
+            do update set
+              decision_status = excluded.decision_status,
+              risk_level = excluded.risk_level,
+              block_reason = excluded.block_reason,
+              edge = excluded.edge,
+              ev = excluded.ev,
+              kelly_fraction = excluded.kelly_fraction,
+              stake_fraction = excluded.stake_fraction,
+              payload = excluded.payload,
+              updated_at = now()
             returning betting_decision_id::text
             """,
             {**row, "payload": json.dumps(row.get("payload", {}))},

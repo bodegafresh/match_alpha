@@ -19,6 +19,7 @@ from app.competitions.catalog import CompetitionCatalogEntry, get_catalog_entry,
 from app.core.config import get_settings
 from app.core.hashing import sha256_json
 from app.core.time import iso_utc, utc_now
+from app.db.repositories.observability import ObservabilityRepository
 from app.normalization.competition_format import get_format_normalizer
 
 logger = logging.getLogger(__name__)
@@ -450,6 +451,16 @@ async def _sync_espn_scoreboard_window(
         await _insert_raw_payload(conn, "ESPN", f"{entry.slug}:scoreboard:{date}", payload)
         events = payload.get("events") or []
         logger.info("ESPN scoreboard response date=%s events=%s", date, len(events))
+        if not events:
+            today_str = utc_now().date().isoformat()
+            severity = "WARN" if date == today_str else "INFO"
+            await ObservabilityRepository(conn).data_quality_event(
+                "INGESTION",
+                severity,
+                "EMPTY_ESPN_RESPONSE",
+                f"ESPN returned 0 events for date={date} competition={entry.slug}",
+                {"date": date, "competition": entry.slug},
+            )
         for event in events:
             raw_events += 1
             await _insert_raw_payload(conn, "ESPN", f"event:{event.get('id')}", event)
@@ -574,6 +585,19 @@ async def _promote_normalized_match(conn: AsyncConnection, season: dict[str, Any
             normalized.get("source"),
             normalized.get("source_match_id"),
             normalized.get("source_match_name"),
+        )
+        await ObservabilityRepository(conn).data_quality_event(
+            "STAGING",
+            "WARN",
+            "MATCH_NOT_FOUND",
+            f"No canonical match found for {normalized.get('source')}:{normalized.get('source_match_id')} — {normalized.get('source_match_name')}",
+            {
+                "source": normalized.get("source"),
+                "source_match_id": normalized.get("source_match_id"),
+                "source_match_name": normalized.get("source_match_name"),
+                "season": season.get("slug"),
+                "kickoff_at": str(normalized.get("kickoff_at") or ""),
+            },
         )
         return False
     home_score = _score(normalized.get("home_score"))

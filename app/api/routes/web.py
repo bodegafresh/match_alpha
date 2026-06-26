@@ -314,7 +314,7 @@ async def web_matches_overview(
         "yesterday": [row for row in rows if in_range(row, yesterday_from, yesterday_to)],
         "today": [row for row in rows if in_range(row, today_from, today_to)],
         "tomorrow": [row for row in rows if in_range(row, tomorrow_from, tomorrow_to)],
-        "upcoming": [row for row in rows if in_range(row, upcoming_from or tomorrow_from, upcoming_to)],
+        "upcoming": [row for row in rows if in_range(row, upcoming_from, upcoming_to)],
         "ranges": {
             "yesterday": {"from": yesterday_from, "to": yesterday_to},
             "today": {"from": today_from, "to": today_to},
@@ -409,11 +409,7 @@ async def web_team_detail(team_slug: str = Query(...), season: str | None = None
     if not team:
         return {"ok": True, "data": {"team": None, "matches": [], "roster": [], "generated_at": iso_utc()}}
     team_id = str(team["team_id"])
-    matches = [
-        row
-        for row in await repo.match_schedule(season_slug)
-        if str(row.get("home_team_id")) == team_id or str(row.get("away_team_id")) == team_id
-    ]
+    matches = await repo.match_schedule_for_team(season_slug, team_id)
     roster = await repo.fetch_all(
         """
         select
@@ -437,6 +433,7 @@ async def web_team_detail(team_slug: str = Query(...), season: str | None = None
         left join player_match_stats pms
           on pms.player_id = cr.player_id
          and pms.team_id = cr.team_id
+         and pms.competition_season_id = cr.competition_season_id
         where cs.slug = :season and cr.team_id = :team_id
         group by p.player_id, p.slug, p.display_name, cr.position, cr.shirt_number
         order by cr.position nulls last, p.display_name
@@ -454,7 +451,7 @@ async def web_team_detail(team_slug: str = Query(...), season: str | None = None
     team_payload = {**_serialize_row(team), **flags}
     data = {
         "team": team_payload,
-        "matches": [_match_from_row(r) for r in matches],
+        "matches": [_match_from_row(r) for r in matches],  # already filtered by team via SQL
         "roster": [_serialize_row(r) for r in roster],
         "generated_at": iso_utc(),
     }
@@ -465,7 +462,7 @@ async def web_team_detail(team_slug: str = Query(...), season: str | None = None
 async def web_knockout(season: str | None = None, conn: AsyncConnection = Depends(get_connection)) -> dict:
     repo = PublishedRepository(conn)
     season_slug = season or get_settings().default_season_slug
-    rows = [row for row in await repo.match_schedule(season_slug) if _is_knockout_row(row)]
+    rows = await repo.match_schedule_knockout(season_slug)
     by_round: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         match = _match_from_row(row)

@@ -57,6 +57,7 @@ class JobOrchestrator:
             OrchestratedJob("model_recompute", requires_finished_matches=True),
             OrchestratedJob("ev_decision", requires_predictions=True, requires_odds=True),
             OrchestratedJob("calibration_recompute", requires_finished_matches=True),
+            OrchestratedJob("pipeline_cleanup"),
         ]
         return await self._run_plan("daily", plan, context)
 
@@ -70,6 +71,7 @@ class JobOrchestrator:
         return await self._run_plan("live", plan, context)
 
     async def should_run_job(self, job_name: str, window: str) -> bool:
+        # Uses the generated column idempotency_key (migration 010) + index for fast lookup.
         row = await self.conn.execute(
             text(
                 """
@@ -77,15 +79,13 @@ class JobOrchestrator:
                 from pipeline_runs
                 where job_name = :job_name
                   and status in ('OK', 'WARN')
-                  and payload ->> 'idempotency_key' = :idempotency_key
-                  and payload ->> 'orchestrator_version' = :orchestrator_version
+                  and idempotency_key = :idempotency_key
                 limit 1
                 """
             ),
             {
                 "job_name": job_name,
                 "idempotency_key": f"{job_name}:{window}",
-                "orchestrator_version": ORCHESTRATOR_VERSION,
             },
         )
         return row.first() is None
@@ -227,17 +227,47 @@ class JobOrchestrator:
 
     async def _build_context(self, live: bool = False) -> dict[str, Any]:
         await self._database_ping()
-        interval = "6 hours" if live else f"{self.settings.odds_refresh_window_hours} hours"
+        # For live: narrow window [-2h, +6h]. For daily: wider window [-2h, +72h].
+        # Scoped to the default competition season to avoid false positives from other competitions.
+        lookahead_hours = 6 if live else self.settings.odds_refresh_window_hours
         row = await self.conn.execute(
             text(
-                f"""
-                select
-                  exists(select 1 from matches where kickoff_at between now() - interval '1 day' and now() + interval '{interval}') as has_upcoming_matches,
-                  exists(select 1 from matches where status = 'FINISHED' and kickoff_at >= now() - interval '2 days') as has_finished_matches,
-                  exists(select 1 from model_predictions where as_of >= now() - interval '7 days') as has_predictions,
-                  exists(select 1 from odds_snapshots where captured_at >= now() - interval '24 hours') as has_odds
                 """
-            )
+                select
+                  exists(
+                    select 1 from matches m
+                    join competition_seasons cs on cs.competition_season_id = m.competition_season_id
+                    where cs.slug = :season
+                      and m.kickoff_at >= now() - interval '2 hours'
+                      and m.kickoff_at <= now() + make_interval(hours => :lookahead_hours)
+                  ) as has_upcoming_matches,
+                  exists(
+                    select 1 from matches m
+                    join competition_seasons cs on cs.competition_season_id = m.competition_season_id
+                    where cs.slug = :season
+                      and m.status = 'FINISHED'
+                      and m.kickoff_at >= now() - interval '2 days'
+                  ) as has_finished_matches,
+                  exists(
+                    select 1 from model_predictions mp
+                    join matches m on m.match_id = mp.match_id
+                    join competition_seasons cs on cs.competition_season_id = mp.competition_season_id
+                    where cs.slug = :season
+                      and mp.as_of >= now() - interval '7 days'
+                  ) as has_predictions,
+                  exists(
+                    select 1 from odds_snapshots os
+                    join matches m on m.match_id = os.match_id
+                    join competition_seasons cs on cs.competition_season_id = m.competition_season_id
+                    where cs.slug = :season
+                      and os.captured_at >= now() - interval '24 hours'
+                  ) as has_odds
+                """
+            ),
+            {
+                "season": self.settings.default_season_slug,
+                "lookahead_hours": lookahead_hours,
+            },
         )
         data = dict(row.first()._mapping)
         data["live"] = live

@@ -81,6 +81,21 @@ async def worldcup_live_refresh_job(conn: AsyncConnection, payload: dict[str, An
     return await worldcup_live_refresh(conn, payload.get("competition"))
 
 
+async def pipeline_cleanup_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deletes pipeline_runs older than 30 days to keep the table lean."""
+    _ = payload
+    result = await conn.execute(
+        text(
+            """
+            delete from pipeline_runs
+            where started_at < now() - interval '30 days'
+            """
+        )
+    )
+    deleted = result.rowcount if result.rowcount is not None else 0
+    return {"status": "OK", "job_name": "pipeline_cleanup", "records_processed": deleted}
+
+
 async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     jobs: dict[str, JobFn] = {
@@ -91,6 +106,7 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "sync_competition_fixtures": sync_competition_fixtures_job,
         "worldcup_daily_refresh": worldcup_daily_refresh_job,
         "worldcup_live_refresh": worldcup_live_refresh_job,
+        "pipeline_cleanup": pipeline_cleanup_job,
     }
     scaffold_jobs = {
         "odds_refresh",
