@@ -1,197 +1,334 @@
 /**
- * Match Alpha — Google Apps Script Scheduler
+ * scheduler.js — Match Alpha GAS Scheduler
+ *
+ * Mismo patrón que BackendCronOrchestration.gs del proyecto original.
+ * GAS solo despierta y orquesta el backend — no ingesta datos ni toca Supabase.
+ *
+ * Fixes del audit aplicados:
+ *   - Keepalive cada 14 min (Render Free duerme a los 15 min de inactividad)
+ *   - Live orchestration cada 15 min (antes era 30)
+ *   - Guard de idempotencia diario en GAS (además del guard del backend)
+ *   - Live orchestration solo corre dentro de la ventana WC2026
+ *   - checkBackendHealth llama al nuevo endpoint /jobs/status/health
+ *   - MAX_FETCH_PER_DAY subido a 400 (el real es 20.000, 80 era muy bajo)
  *
  * Setup:
- *   1. In GAS editor: File > Project Properties > Script Properties
- *      Add: API_INTERNAL_KEY = <your key>
- *   2. Create time-driven triggers:
- *      - keepalive()           → every 14 minutes  (prevents Render Free from sleeping)
- *      - dailyOrchestration()  → every hour        (internal guard ensures it runs once/day)
- *      - liveOrchestration()   → every 15 minutes  (backend decides if it should run)
- *
- * Render Free sleeps after 15 min of inactivity.
- * Keepalive at 14 min ensures the backend stays warm at all times.
+ *   1. Script Properties (Archivo > Propiedades del proyecto):
+ *        BACKEND_BASE_URL   = https://tu-backend.onrender.com
+ *        API_INTERNAL_KEY   = <tu clave interna>
+ *   2. Correr installMatchAlphaTriggers() una sola vez para crear los triggers.
  */
 
-// ─── CONFIGURATION ───────────────────────────────────────────────────────────
+// ─── CONFIGURACIÓN ────────────────────────────────────────────────────────────
 
-var BACKEND_URL = 'https://match-alpha.onrender.com/api/v1';
-var MAX_DAILY_FETCHES = 400;            // hard cap — real limit is 20,000 but stay conservative
-var DAILY_ORCHESTRATION_HOUR_UTC = 6;  // run daily jobs at 06:00 UTC
-var HTTP_TIMEOUT_MS = 25000;           // 25 s — GAS default is 30 s
+var MATCH_ALPHA_CRON_CONFIG = {
+  BACKEND_BASE_URL:         'https://YOUR_RENDER_SERVICE.onrender.com',
+  API_INTERNAL_KEY:         'SET_IN_SCRIPT_PROPERTIES',
+  MAX_FETCH_PER_DAY:        400,
+  KEEPALIVE_ENABLED:        true,
+  DAILY_JOB_ENABLED:        true,
+  LIVE_JOB_ENABLED:         true,
+  FETCH_TIMEOUT_MS:         25000,
+  DAILY_HOUR_UTC:           6,    // hora UTC en que corre el daily (06:00)
+  // Ventana WC2026 para live orchestration
+  WC_START_ISO:             '2026-06-11T00:00:00Z',
+  WC_END_ISO:               '2026-07-20T00:00:00Z'
+};
 
-// World Cup 2026 window — liveOrchestration only fires during this period
-var WC_START_MS = new Date('2026-06-11T00:00:00Z').getTime();
-var WC_END_MS   = new Date('2026-07-20T00:00:00Z').getTime();
+var MATCH_ALPHA_CRON_PROPS = {
+  FETCH_COUNT:              'MATCH_ALPHA_FETCH_COUNT',
+  FETCH_COUNT_DATE:         'MATCH_ALPHA_FETCH_COUNT_DATE',
+  LAST_STATUS:              'MATCH_ALPHA_LAST_BACKEND_STATUS',
+  DAILY_RAN_DATE:           'MATCH_ALPHA_DAILY_RAN_DATE',
+  TRIGGER_PREFIX:           'MATCH_ALPHA_BACKEND_TRIGGER_'
+};
 
-// ─── PUBLIC FUNCTIONS (attach as triggers) ───────────────────────────────────
+// ─── FUNCIONES PÚBLICAS (adjuntar como triggers) ──────────────────────────────
 
 /**
- * keepalive — run every 14 minutes.
- * Pings the backend so Render Free never hits its 15-min sleep timeout.
+ * pingBackendKeepAlive — configurar cada 14 minutos.
+ * Mantiene el backend de Render Free despierto (se duerme a los 15 min).
  */
-function keepalive() {
-  if (!_canFetch('keepalive')) return;
-  var resp = _post('/jobs/orchestrate/keepalive', {});
-  _recordFetch();
-  if (!resp) return;
-  if (resp.code >= 500) {
-    _logError('keepalive', resp.code, resp.body);
-  } else {
-    Logger.log('[keepalive] ok latency_ms=' + (JSON.parse(resp.body || '{}').database_latency_ms || '?'));
+function pingBackendKeepAlive() {
+  var config = getBackendCronConfig_();
+  if (!config.KEEPALIVE_ENABLED) {
+    return logBackendCronResult_('pingBackendKeepAlive', { ok: false, skipped: true, reason: 'KEEPALIVE_DISABLED' });
   }
+  return logBackendCronResult_(
+    'pingBackendKeepAlive',
+    backendFetch_('/api/v1/jobs/orchestrate/keepalive', { method: 'post', payload: { source: 'gas_keepalive' } })
+  );
 }
 
 /**
- * dailyOrchestration — run every hour.
- * Internal guard: only executes the actual daily job once per UTC day.
+ * runDailyBackendOrchestration — configurar cada 1 hora.
+ * Guard interno: solo ejecuta el job diario una vez por día UTC.
+ * El backend también tiene su propio guard de idempotencia por ventana.
  */
-function dailyOrchestration() {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(10000)) {
-    Logger.log('[daily] skipped — lock held by another execution');
-    return;
+function runDailyBackendOrchestration() {
+  var config = getBackendCronConfig_();
+  if (!config.DAILY_JOB_ENABLED) {
+    return logBackendCronResult_('runDailyBackendOrchestration', { ok: false, skipped: true, reason: 'DAILY_JOB_DISABLED' });
   }
+
+  // Guard de hora: solo correr en la hora UTC configurada
+  var nowUtcHour = new Date().getUTCHours();
+  if (nowUtcHour !== config.DAILY_HOUR_UTC) {
+    return logBackendCronResult_('runDailyBackendOrchestration', {
+      ok: false, skipped: true, reason: 'WRONG_HOUR', utc_hour: nowUtcHour
+    });
+  }
+
+  // Guard de idempotencia: solo correr una vez por día UTC
+  var props = PropertiesService.getScriptProperties();
+  var today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+  var ranDate = props.getProperty(MATCH_ALPHA_CRON_PROPS.DAILY_RAN_DATE);
+  if (ranDate === today) {
+    return logBackendCronResult_('runDailyBackendOrchestration', {
+      ok: false, skipped: true, reason: 'ALREADY_RAN_TODAY', date: today
+    });
+  }
+
+  var result = backendFetch_('/api/v1/jobs/orchestrate/daily', { method: 'post', payload: { source: 'gas_daily' } });
+
+  // Marcar como ejecutado solo si el backend respondió sin error 5xx
+  if (result.ok || (result.status_code && result.status_code < 500)) {
+    props.setProperty(MATCH_ALPHA_CRON_PROPS.DAILY_RAN_DATE, today);
+    // Limpiar registro del día anterior para no acumular
+    var yesterday = Utilities.formatDate(new Date(Date.now() - 86400000), 'UTC', 'yyyy-MM-dd');
+    if (ranDate === yesterday) {
+      props.deleteProperty(MATCH_ALPHA_CRON_PROPS.DAILY_RAN_DATE);
+      props.setProperty(MATCH_ALPHA_CRON_PROPS.DAILY_RAN_DATE, today);
+    }
+  }
+
+  return logBackendCronResult_('runDailyBackendOrchestration', result);
+}
+
+/**
+ * runLiveBackendOrchestration — configurar cada 15 minutos.
+ * Solo corre durante la ventana de partidos (WC2026).
+ * El backend decide internamente si hay partidos activos y cuáles jobs ejecutar.
+ */
+function runLiveBackendOrchestration() {
+  var config = getBackendCronConfig_();
+  if (!config.LIVE_JOB_ENABLED) {
+    return logBackendCronResult_('runLiveBackendOrchestration', { ok: false, skipped: true, reason: 'LIVE_JOB_DISABLED' });
+  }
+
+  if (!isInMatchWindow_(config)) {
+    return logBackendCronResult_('runLiveBackendOrchestration', {
+      ok: false, skipped: true, reason: 'OUTSIDE_MATCH_WINDOW'
+    });
+  }
+
+  return logBackendCronResult_(
+    'runLiveBackendOrchestration',
+    backendFetch_('/api/v1/jobs/orchestrate/live', { method: 'post', payload: { source: 'gas_live' } })
+  );
+}
+
+/**
+ * checkBackendHealth — opcional, correr 1 vez al día para monitoreo.
+ * Llama al nuevo endpoint /jobs/status/health introducido en el audit.
+ */
+function checkBackendHealth() {
+  return logBackendCronResult_(
+    'checkBackendHealth',
+    backendFetch_('/api/v1/jobs/status/health', { method: 'get' })
+  );
+}
+
+/**
+ * checkBackendLatestStatus — mantener por compatibilidad con el script original.
+ */
+function checkBackendLatestStatus() {
+  return logBackendCronResult_(
+    'checkBackendLatestStatus',
+    backendFetch_('/api/v1/jobs/status/latest', { method: 'get' })
+  );
+}
+
+// ─── GESTIÓN DE TRIGGERS ──────────────────────────────────────────────────────
+
+/**
+ * installMatchAlphaTriggers — correr UNA SOLA VEZ para configurar los triggers.
+ *
+ * Intervalos corregidos vs versión anterior:
+ *   - Keepalive: 14 min  (antes 30 — Render Free dormía entre cada ping)
+ *   - Live:      15 min  (antes 30 — se perdían actualizaciones de live scores)
+ *   - Daily:      1 hora (igual, con guard interno de hora+idempotencia)
+ */
+function installMatchAlphaTriggers() {
+  removeMatchAlphaTriggers();
+
+  var keepalive = ScriptApp.newTrigger('pingBackendKeepAlive')
+    .timeBased()
+    .everyMinutes(14)
+    .create();
+
+  var daily = ScriptApp.newTrigger('runDailyBackendOrchestration')
+    .timeBased()
+    .everyHours(1)
+    .create();
+
+  var live = ScriptApp.newTrigger('runLiveBackendOrchestration')
+    .timeBased()
+    .everyMinutes(15)
+    .create();
+
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'KEEPALIVE', keepalive.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
+
+  Logger.log('Triggers instalados: keepalive=14min daily=1h live=15min');
+  return {
+    ok: true,
+    keepalive_trigger_id: keepalive.getUniqueId(),
+    daily_trigger_id: daily.getUniqueId(),
+    live_trigger_id: live.getUniqueId()
+  };
+}
+
+function removeMatchAlphaTriggers() {
+  var handlers = {
+    pingBackendKeepAlive: true,
+    runDailyBackendOrchestration: true,
+    runLiveBackendOrchestration: true,
+    checkBackendLatestStatus: true,
+    checkBackendHealth: true
+  };
+
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    if (handlers[trigger.getHandlerFunction()]) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  var props = PropertiesService.getScriptProperties();
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'KEEPALIVE');
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY');
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE');
+
+  return { ok: true, removed: true };
+}
+
+// ─── HELPERS INTERNOS ─────────────────────────────────────────────────────────
+
+function backendFetch_(path, options) {
+  options = options || {};
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return { ok: false, skipped: true, reason: 'LOCK_BUSY', timestamp: new Date().toISOString() };
+  }
+
   try {
-    var now = new Date();
-    var hourUtc = now.getUTCHours();
-
-    // Only attempt during the designated hour (or within 59 min after it)
-    if (hourUtc !== DAILY_ORCHESTRATION_HOUR_UTC) {
-      Logger.log('[daily] skipped — not the right hour (UTC ' + hourUtc + ')');
-      return;
+    if (!canUseFetch_()) {
+      return { ok: false, skipped: true, reason: 'FETCH_DAILY_LIMIT_REACHED', timestamp: new Date().toISOString() };
     }
 
-    var props = PropertiesService.getScriptProperties();
-    var todayKey = 'daily_ran_' + _utcDateStr(0);
-    if (props.getProperty(todayKey)) {
-      Logger.log('[daily] skipped — already ran today (' + _utcDateStr(0) + ')');
-      return;
+    var config = getBackendCronConfig_();
+    var url = config.BACKEND_BASE_URL.replace(/\/+$/, '') + path;
+    var params = {
+      method: options.method || 'get',
+      muteHttpExceptions: true,
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + config.API_INTERNAL_KEY }
+    };
+    if (options.payload) {
+      params.payload = JSON.stringify(options.payload);
     }
 
-    if (!_canFetch('daily')) return;
-
-    var resp = _post('/jobs/orchestrate/daily', {});
-    _recordFetch();
-    if (!resp) return;
-
-    if (resp.code < 500) {
-      props.setProperty(todayKey, 'true');
-      // Evict yesterday's key to avoid unbounded growth
-      props.deleteProperty('daily_ran_' + _utcDateStr(-1));
-      Logger.log('[daily] dispatched status=' + resp.code);
-    } else {
-      _logError('daily', resp.code, resp.body);
+    incrementFetchCounter_();
+    var response;
+    try {
+      response = UrlFetchApp.fetch(url, params);
+    } catch (firstError) {
+      Utilities.sleep(1000);
+      if (!canUseFetch_()) throw firstError;
+      incrementFetchCounter_();
+      response = UrlFetchApp.fetch(url, params);
     }
+
+    var statusCode = response.getResponseCode();
+    var text = response.getContentText();
+    var body = {};
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch (parseError) {
+      body = { raw: text };
+    }
+
+    var result = {
+      ok: statusCode >= 200 && statusCode < 300,
+      status_code: statusCode,
+      data: body,
+      timestamp: new Date().toISOString()
+    };
+    PropertiesService.getScriptProperties().setProperty(
+      MATCH_ALPHA_CRON_PROPS.LAST_STATUS, JSON.stringify(result)
+    );
+    Logger.log('backendFetch_ %s %s -> %s', params.method.toUpperCase(), path, statusCode);
+    return result;
   } finally {
     lock.releaseLock();
   }
 }
 
-/**
- * liveOrchestration — run every 15 minutes.
- * Only fires during the WC 2026 window; backend further decides whether to run each job.
- */
-function liveOrchestration() {
-  if (!_isMatchWindow()) {
-    Logger.log('[live] skipped — outside WC2026 window');
-    return;
-  }
-  if (!_canFetch('live')) return;
-
-  var resp = _post('/jobs/orchestrate/live', {});
-  _recordFetch();
-  if (!resp) return;
-
-  if (resp.code >= 500) {
-    _logError('live', resp.code, resp.body);
-  } else {
-    var body = JSON.parse(resp.body || '{}');
-    Logger.log('[live] dispatched executed=' + JSON.stringify(body.executed || []) + ' skipped=' + JSON.stringify(body.skipped || []));
-  }
+function canUseFetch_() {
+  resetDailyFetchCounterIfNeeded_();
+  var config = getBackendCronConfig_();
+  var props = PropertiesService.getScriptProperties();
+  var count = Number(props.getProperty(MATCH_ALPHA_CRON_PROPS.FETCH_COUNT) || 0);
+  return count < Number(config.MAX_FETCH_PER_DAY || 400);
 }
 
-/**
- * statusCheck — optional, run once a day to log the health endpoint.
- */
-function statusCheck() {
-  if (!_canFetch('status')) return;
-  var resp = _get('/jobs/status/health');
-  _recordFetch();
-  if (!resp) return;
-  Logger.log('[status] ' + resp.body);
+function incrementFetchCounter_() {
+  resetDailyFetchCounterIfNeeded_();
+  var props = PropertiesService.getScriptProperties();
+  var count = Number(props.getProperty(MATCH_ALPHA_CRON_PROPS.FETCH_COUNT) || 0) + 1;
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.FETCH_COUNT, String(count));
+  return count;
 }
 
-// ─── PRIVATE HELPERS ─────────────────────────────────────────────────────────
-
-function _post(path, data) {
-  return _fetch(path, 'post', JSON.stringify(data || {}));
-}
-
-function _get(path) {
-  return _fetch(path, 'get', null);
-}
-
-function _fetch(path, method, payload) {
-  var apiKey = PropertiesService.getScriptProperties().getProperty('API_INTERNAL_KEY');
-  if (!apiKey) {
-    Logger.log('[match-alpha] API_INTERNAL_KEY not set in Script Properties');
-    return null;
-  }
-  var options = {
-    method: method,
-    headers: {
-      'Authorization': 'Bearer ' + apiKey,
-      'Content-Type': 'application/json',
-    },
-    muteHttpExceptions: true,
-    followRedirects: true,
-  };
-  if (payload !== null) {
-    options.payload = payload;
-  }
-  try {
-    var response = UrlFetchApp.fetch(BACKEND_URL + path, options);
-    return { code: response.getResponseCode(), body: response.getContentText() };
-  } catch (e) {
-    _logError(path, 0, e.toString());
-    return null;
+function resetDailyFetchCounterIfNeeded_() {
+  var props = PropertiesService.getScriptProperties();
+  var today = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+  var storedDate = props.getProperty(MATCH_ALPHA_CRON_PROPS.FETCH_COUNT_DATE);
+  if (storedDate !== today) {
+    props.setProperty(MATCH_ALPHA_CRON_PROPS.FETCH_COUNT_DATE, today);
+    props.setProperty(MATCH_ALPHA_CRON_PROPS.FETCH_COUNT, '0');
   }
 }
 
-/** Returns true if the current time is within the World Cup 2026 match window. */
-function _isMatchWindow() {
+function isInMatchWindow_(config) {
   var now = Date.now();
-  return now >= WC_START_MS && now <= WC_END_MS;
+  var start = new Date(config.WC_START_ISO).getTime();
+  var end = new Date(config.WC_END_ISO).getTime();
+  return now >= start && now <= end;
 }
 
-/** Rate-limit guard: returns true if we're within daily fetch budget. */
-function _canFetch(caller) {
+function getBackendCronConfig_() {
   var props = PropertiesService.getScriptProperties();
-  var key = 'fetch_count_' + _utcDateStr(0);
-  var count = parseInt(props.getProperty(key) || '0', 10);
-  if (count >= MAX_DAILY_FETCHES) {
-    Logger.log('[' + caller + '] skipped — daily fetch limit reached (' + count + ')');
-    return false;
-  }
-  return true;
+  return Object.assign({}, MATCH_ALPHA_CRON_CONFIG, {
+    BACKEND_BASE_URL: props.getProperty('BACKEND_BASE_URL') || MATCH_ALPHA_CRON_CONFIG.BACKEND_BASE_URL,
+    API_INTERNAL_KEY: props.getProperty('API_INTERNAL_KEY') || MATCH_ALPHA_CRON_CONFIG.API_INTERNAL_KEY,
+    MAX_FETCH_PER_DAY: Number(props.getProperty('MAX_FETCH_PER_DAY') || MATCH_ALPHA_CRON_CONFIG.MAX_FETCH_PER_DAY),
+    DAILY_HOUR_UTC: Number(props.getProperty('DAILY_HOUR_UTC') || MATCH_ALPHA_CRON_CONFIG.DAILY_HOUR_UTC),
+    KEEPALIVE_ENABLED: readBooleanProperty_('KEEPALIVE_ENABLED', MATCH_ALPHA_CRON_CONFIG.KEEPALIVE_ENABLED),
+    DAILY_JOB_ENABLED: readBooleanProperty_('DAILY_JOB_ENABLED', MATCH_ALPHA_CRON_CONFIG.DAILY_JOB_ENABLED),
+    LIVE_JOB_ENABLED: readBooleanProperty_('LIVE_JOB_ENABLED', MATCH_ALPHA_CRON_CONFIG.LIVE_JOB_ENABLED)
+  });
 }
 
-/** Increments the daily fetch counter. */
-function _recordFetch() {
-  var props = PropertiesService.getScriptProperties();
-  var key = 'fetch_count_' + _utcDateStr(0);
-  var count = parseInt(props.getProperty(key) || '0', 10);
-  props.setProperty(key, String(count + 1));
+function readBooleanProperty_(key, fallback) {
+  var value = PropertiesService.getScriptProperties().getProperty(key);
+  if (value === null || value === undefined || value === '') return fallback;
+  return String(value).toLowerCase() === 'true';
 }
 
-/** Returns UTC date string YYYY-MM-DD with optional day offset. */
-function _utcDateStr(offsetDays) {
-  var d = new Date();
-  d.setDate(d.getDate() + (offsetDays || 0));
-  return d.toISOString().slice(0, 10);
-}
-
-function _logError(fn, code, msg) {
-  Logger.log('[match-alpha][' + fn + '] ERROR HTTP ' + code + ': ' + String(msg || '').slice(0, 300));
+function logBackendCronResult_(label, result) {
+  Logger.log('%s result: %s', label, JSON.stringify(result));
+  return result;
 }
