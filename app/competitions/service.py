@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from datetime import timedelta
@@ -19,6 +20,8 @@ from app.core.config import get_settings
 from app.core.hashing import sha256_json
 from app.core.time import iso_utc, utc_now
 from app.normalization.competition_format import get_format_normalizer
+
+logger = logging.getLogger(__name__)
 
 
 def _json(value: dict[str, Any] | list[Any]) -> str:
@@ -331,15 +334,20 @@ async def worldcup_daily_refresh(conn: AsyncConnection, competition: str | None 
     dates = [(utc_now().date() + timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)]
     results: list[dict[str, Any]] = []
     records = 0
+    logger.info("worldcup_daily_refresh started competition=%s dates=%s", entry.slug, dates)
 
     espn_result = await _sync_espn_scoreboard_window(conn, entry, season, dates)
     results.append(espn_result)
     records += int(espn_result.get("records_processed") or 0)
+    logger.info("worldcup_daily_refresh ESPN result=%s", espn_result)
 
     if settings.football_data_token:
         football_data_result = await _sync_football_data_matches(conn, entry, season)
         results.append(football_data_result)
         records += int(football_data_result.get("records_processed") or 0)
+        logger.info("worldcup_daily_refresh FootballData result=%s", football_data_result)
+    else:
+        logger.info("worldcup_daily_refresh FootballData skipped reason=missing_token")
 
     status = "OK" if any(item.get("status") == "OK" for item in results) else "WARN"
     payload = {
@@ -349,6 +357,7 @@ async def worldcup_daily_refresh(conn: AsyncConnection, competition: str | None 
         "generated_at": iso_utc(),
     }
     await _merge_season_metadata(conn, season["competition_season_id"], {"last_daily_refresh": payload})
+    logger.info("worldcup_daily_refresh finished status=%s records=%s", status, records)
     return {
         "status": status,
         "job_name": "worldcup_daily_refresh",
@@ -432,16 +441,21 @@ async def _sync_espn_scoreboard_window(
     client = EspnClient()
     for date in dates:
         try:
+            logger.info("ESPN scoreboard request date=%s", date)
             payload = await client.scoreboard(date.replace("-", ""))
         except (httpx.HTTPError, TimeoutError, OSError) as exc:
+            logger.warning("ESPN scoreboard failed date=%s error=%s", date, type(exc).__name__)
             errors.append({"date": date, "error": type(exc).__name__})
             continue
         await _insert_raw_payload(conn, "ESPN", f"{entry.slug}:scoreboard:{date}", payload)
-        for event in payload.get("events") or []:
+        events = payload.get("events") or []
+        logger.info("ESPN scoreboard response date=%s events=%s", date, len(events))
+        for event in events:
             raw_events += 1
             await _insert_raw_payload(conn, "ESPN", f"event:{event.get('id')}", event)
             if await _promote_normalized_match(conn, season, _normalize_espn_event(event)):
                 updated += 1
+    logger.info("ESPN scoreboard window finished raw_events=%s updated=%s errors=%s", raw_events, updated, len(errors))
     return {
         "status": "OK" if raw_events else "WARN",
         "source": "ESPN",
@@ -460,13 +474,16 @@ async def _sync_football_data_matches(
     if not code:
         return {"status": "WARN", "source": "FOOTBALL_DATA", "records_processed": 0, "reason": "NO_EXTERNAL_ID"}
     try:
+        logger.info("FootballData matches request code=%s season=%s", code, entry.season_label[:4])
         payload = await FootballDataClient().competition_matches(code, entry.season_label[:4])
     except (httpx.HTTPError, TimeoutError, OSError) as exc:
+        logger.warning("FootballData matches failed code=%s error=%s", code, type(exc).__name__)
         return {"status": "WARN", "source": "FOOTBALL_DATA", "records_processed": 0, "error": type(exc).__name__}
 
     await _insert_raw_payload(conn, "FOOTBALL_DATA", f"{entry.slug}:matches", payload)
     updated = 0
     matches = payload.get("matches") or []
+    logger.info("FootballData matches response matches=%s", len(matches))
     for match in matches:
         await _insert_raw_payload(conn, "FOOTBALL_DATA", f"match:{match.get('id')}", match)
         normalized = _normalize_football_data_match(match)
@@ -474,6 +491,7 @@ async def _sync_football_data_matches(
             continue
         if await _promote_normalized_match(conn, season, normalized):
             updated += 1
+    logger.info("FootballData matches finished raw_matches=%s updated=%s", len(matches), updated)
     return {
         "status": "OK" if matches else "WARN",
         "source": "FOOTBALL_DATA",
@@ -551,6 +569,12 @@ async def _promote_normalized_match(conn: AsyncConnection, season: dict[str, Any
         return False
     match = await _find_existing_match(conn, season, normalized)
     if not match:
+        logger.info(
+            "match promotion skipped source=%s source_match_id=%s name=%s reason=no_existing_match",
+            normalized.get("source"),
+            normalized.get("source_match_id"),
+            normalized.get("source_match_name"),
+        )
         return False
     home_score = _score(normalized.get("home_score"))
     away_score = _score(normalized.get("away_score"))
@@ -584,6 +608,15 @@ async def _promote_normalized_match(conn: AsyncConnection, season: dict[str, Any
     await _update_participant_score(conn, match["match_id"], "HOME", home_score)
     await _update_participant_score(conn, match["match_id"], "AWAY", away_score)
     await _upsert_match_external_ref(conn, match["match_id"], normalized)
+    logger.info(
+        "match promoted match_id=%s source=%s source_match_id=%s status=%s score=%s-%s",
+        match["match_id"],
+        normalized.get("source"),
+        normalized.get("source_match_id"),
+        normalized.get("status"),
+        home_score,
+        away_score,
+    )
     return True
 
 
