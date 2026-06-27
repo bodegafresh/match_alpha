@@ -36,3 +36,15 @@ async def calibration_summary(limit: int = Query(50, ge=1, le=200), conn: AsyncC
 async def model_diagnostics(conn: AsyncConnection = Depends(get_connection)) -> dict:
     rows = await PublishedRepository(conn).model_diagnostics()
     return {"ok": True, "data": {"models": rows}}
+
+
+@router.get("/stats/bankroll")
+async def bankroll_stats(limit: int = Query(200, ge=1, le=1000), conn: AsyncConnection = Depends(get_connection)) -> dict:
+    rows = await PublishedRepository(conn).bankroll_decisions(limit)
+    return {"ok": True, "data": {"decisions": rows}}
+
+
+@router.get("/stats/roi-by-ev")
+async def roi_by_ev_range(conn: AsyncConnection = Depends(get_connection)) -> dict:
+    rows = await PublishedRepository(conn).roi_by_ev_buckets()
+    return {"ok": True, "data": {"buckets": rows}}

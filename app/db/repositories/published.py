@@ -209,3 +209,80 @@ class PublishedRepository(Repository):
         return await self.fetch_all(
             "select * from published_model_diagnostics order by model_name, model_version",
         )
+
+    async def bankroll_decisions(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Returns SETTLED betting decisions in chronological order for bankroll simulation."""
+        return await self.fetch_all(
+            """
+            select
+              bd.betting_decision_id::text,
+              bd.decided_at,
+              bd.decision_status::text,
+              bd.ev,
+              bd.edge,
+              bd.kelly_fraction,
+              bd.stake_fraction,
+              bd.settlement_status::text,
+              bd.settlement_profit_units,
+              m.market_code,
+              s.selection_code
+            from betting_decisions bd
+            join model_predictions p on p.prediction_id = bd.prediction_id
+            join markets m on m.market_id = p.market_id
+            join market_selections s on s.selection_id = p.selection_id
+            where bd.settlement_status = 'SETTLED'
+            order by bd.decided_at asc
+            limit :limit
+            """,
+            {"limit": limit},
+        )
+
+    async def roi_by_ev_buckets(self) -> list[dict[str, Any]]:
+        """Groups SETTLED decisions by EV range bucket and computes ROI per bucket."""
+        return await self.fetch_all(
+            """
+            with buckets as (
+              select
+                bd.betting_decision_id,
+                bd.ev,
+                bd.stake_fraction,
+                bd.settlement_profit_units,
+                bd.settlement_status,
+                case
+                  when bd.ev >= 0    and bd.ev < 0.01 then '0-1%%'
+                  when bd.ev >= 0.01 and bd.ev < 0.03 then '1-3%%'
+                  when bd.ev >= 0.03 and bd.ev < 0.05 then '3-5%%'
+                  when bd.ev >= 0.05                   then '5%%+'
+                  else 'negative'
+                end as ev_bucket,
+                case
+                  when bd.ev >= 0    and bd.ev < 0.01 then 0.00
+                  when bd.ev >= 0.01 and bd.ev < 0.03 then 0.01
+                  when bd.ev >= 0.03 and bd.ev < 0.05 then 0.03
+                  when bd.ev >= 0.05                   then 0.05
+                  else null
+                end as ev_min
+              from betting_decisions bd
+              where bd.ev is not null
+            )
+            select
+              ev_bucket,
+              ev_min,
+              count(*)                                                             as count,
+              count(*) filter (where settlement_status = 'SETTLED')               as settled_count,
+              round(
+                case
+                  when sum(coalesce(stake_fraction, 0)) filter (where settlement_status = 'SETTLED') > 0
+                  then sum(coalesce(settlement_profit_units, 0)) filter (where settlement_status = 'SETTLED')
+                     / sum(coalesce(stake_fraction, 0)) filter (where settlement_status = 'SETTLED') * 100
+                  else null
+                end::numeric,
+                2
+              ) as roi_pct,
+              round(avg(ev)::numeric, 4) as avg_ev
+            from buckets
+            where ev_bucket != 'negative'
+            group by ev_bucket, ev_min
+            order by ev_min nulls last
+            """,
+        )
