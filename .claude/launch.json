@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "match-alpha-web",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8183", "--directory", "/Users/mcerda/mcerda_git/match_alpha_web"],
+      "port": 8183,
+      "autoPort": false
+    }
+  ]
+}
