@@ -154,7 +154,7 @@ async def _upsert_prediction(
               '{}',
               cast(:payload as jsonb)
             )
-            ON CONFLICT (model_run_id, match_id, market_id, selection_id, line, as_of)
+            ON CONFLICT (model_run_id, match_id, market_id, selection_id, line, as_of) NULLS NOT DISTINCT
             DO UPDATE SET
               raw_probability = excluded.raw_probability,
               fair_odds       = excluded.fair_odds,
