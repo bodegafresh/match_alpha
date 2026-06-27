@@ -152,9 +152,12 @@ class PublishedRepository(Repository):
         return await self.fetch_all(sql, {"season": season})
 
     async def standings_groups(self, season: str) -> list[dict[str, Any]]:
+        # DISTINCT ON (cg.group_id, t.team_id) with as_of DESC ensures we get
+        # only the latest standings row per (group, team), even if the refresh
+        # job has accumulated multiple rows with different as_of timestamps.
         return await self.fetch_all(
             """
-            select
+            select distinct on (cg.group_id, t.team_id)
               cg.group_id::text,
               cg.group_code,
               cg.group_name,
@@ -182,7 +185,7 @@ class PublishedRepository(Repository):
             left join teams t on t.team_id = s.team_id
             left join countries c on c.code_alpha2 = t.country_code
             where cs.slug = :season
-            order by cg.group_order nulls last, s.position nulls last, t.display_name
+            order by cg.group_id, t.team_id, s.as_of desc nulls last
             """,
             {"season": season},
         )
