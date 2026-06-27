@@ -43,7 +43,8 @@ class Settings(BaseSettings):
     min_calibration_sample_size: int = Field(default=50, alias="MIN_CALIBRATION_SAMPLE_SIZE")
     max_ece_for_bettable: float = Field(default=0.08, alias="MAX_ECE_FOR_BETTABLE")
 
-    slack_webhook_url: str | None = Field(default=None, alias="SLACK_WEBHOOK_URL")
+    telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str | None = Field(default=None, alias="TELEGRAM_CHAT_ID")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
