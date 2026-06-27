@@ -433,7 +433,10 @@ async def web_team_detail(team_slug: str = Query(...), season: str | None = None
         left join player_match_stats pms
           on pms.player_id = cr.player_id
          and pms.team_id = cr.team_id
-         and pms.competition_season_id = cr.competition_season_id
+         and pms.match_id in (
+           select m.match_id from matches m
+           where m.competition_season_id = cr.competition_season_id
+         )
         where cs.slug = :season and cr.team_id = :team_id
         group by p.player_id, p.slug, p.display_name, cr.position, cr.shirt_number
         order by cr.position nulls last, p.display_name
