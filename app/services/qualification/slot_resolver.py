@@ -114,6 +114,17 @@ class TournamentSlotResolver:
         source_rank = slot.get("source_rank")
         source_match_id = slot.get("source_match_id")
 
+        # ── Already resolved with no re-resolution source data
+        # (source_group_id and source_match_id both absent means we can't re-verify)
+        if slot.get("resolved_team_id") and not source_group_id and not source_match_id:
+            log.warning("slot %s has resolved_team_id but no source data — keeping cached value", slot_code)
+            return SlotResolution(
+                slot_id=slot_id, slot_code=slot_code, slot_label=slot_label,
+                resolved_team_id=slot["resolved_team_id"],
+                status=SLOT_STATUS_RESOLVED, reason="already_resolved_no_source",
+                source="tournament_slots",
+            )
+
         # ── Group winner / runner-up
         if source_group_id and source_rank and source_rank <= 2:
             team = self._find_by_group_rank(group_standings, source_group_id, source_rank)
