@@ -1,0 +1,19 @@
+app/jobs/registry.py
+  s_acedc47d393e24::t_e593aba6c574d9 625-628,644-656,662-663,668-669
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "8307896ba2f1dcf5fd81015824911eaa9b3ab33a",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
