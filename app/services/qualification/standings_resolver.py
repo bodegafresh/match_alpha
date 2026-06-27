@@ -66,6 +66,7 @@ class StandingsResolver:
         if not groups:
             return {"groups_processed": 0, "all_thirds": [], "warning": "no groups found"}
 
+        fair_play_scores = await self._get_fair_play_scores(competition_season_id)
         matches = await self._get_finished_group_matches(competition_season_id)
 
         # Build match index for H2H lookups: {(team_a, team_b): match}
@@ -87,28 +88,24 @@ class StandingsResolver:
             away_score = m["away_score"] or 0
             g = group_meta[gid]
 
-            home_fp = m.get("home_fair_play_score", 0) or 0
-            away_fp = m.get("away_fair_play_score", 0) or 0
             home_rank = m.get("home_fifa_ranking", 999) or 999
             away_rank = m.get("away_fifa_ranking", 999) or 999
 
-            for tid, tname, gf, ga, fp, rank in [
-                (home_id, m["home_name"], home_score, away_score, home_fp, home_rank),
-                (away_id, m["away_name"], away_score, home_score, away_fp, away_rank),
+            for tid, tname, gf, ga, rank in [
+                (home_id, m["home_name"], home_score, away_score, home_rank),
+                (away_id, m["away_name"], away_score, home_score, away_rank),
             ]:
                 if tid not in group_stats[gid]:
                     group_stats[gid][tid] = TeamStats(
                         team_id=tid, team_name=tname,
                         group_id=gid, group_code=g["group_code"],
-                        fair_play_score=fp,
+                        fair_play_score=fair_play_scores.get(tid, 0),
                         fifa_ranking=rank,
                     )
                 t = group_stats[gid][tid]
                 t.played += 1
                 t.goals_for += gf
                 t.goals_against += ga
-                # Update fair_play/ranking from latest match data
-                t.fair_play_score = fp
                 t.fifa_ranking = rank
                 if gf > ga:
                     t.wins += 1; t.points += 3
@@ -118,7 +115,10 @@ class StandingsResolver:
                     t.losses += 1
 
         all_thirds: list[TeamStats] = []
+        decided_groups: list[dict] = []
         groups_processed = 0
+
+        PENDING_STATUSES = {PENDING, PENDING_TIEBREAKER}
 
         for group_id, team_map in group_stats.items():
             if not team_map:
@@ -145,12 +145,24 @@ class StandingsResolver:
                 group_meta[group_id]["group_code"], len(sorted_teams),
             )
 
+            # Track fully-decided groups (all teams have non-pending status)
+            if (len(sorted_teams) >= 4 and
+                    all(t.qualification_status not in PENDING_STATUSES for t in sorted_teams)):
+                decided_groups.append({
+                    "group_code": sorted_teams[0].group_code,
+                    "winner": sorted_teams[0].team_name,
+                    "runner_up": sorted_teams[1].team_name,
+                    "third": sorted_teams[2].team_name,
+                    "eliminated": sorted_teams[3].team_name,
+                })
+
         return {
             "groups_processed": groups_processed,
             "all_thirds": [{"team_id": t.team_id, "group_code": t.group_code,
                              "points": t.points, "goal_difference": t.goal_difference,
                              "goals_for": t.goals_for, "tiebreaker_notes": t.tiebreaker_notes}
                            for t in all_thirds],
+            "decided_groups": decided_groups,
         }
 
     # ── ranking ───────────────────────────────────────────────────────────────
@@ -336,6 +348,42 @@ class StandingsResolver:
 
     # ── DB helpers ─────────────────────────────────────────────────────────────
 
+    async def _get_fair_play_scores(self, competition_season_id: str) -> dict[str, int]:
+        """Compute fair play score per team from match_events in GROUP_STAGE matches.
+
+        FIFA penalties: Yellow=-1, Direct Red=-3, Yellow+Red (double yellow)=-4
+        Returns {team_id: score} where score is negative (less negative = better).
+        """
+        try:
+            result = await self.conn.execute(
+                text("""
+                    SELECT
+                        mp.team_id::text,
+                        SUM(CASE
+                            WHEN upper(me.event_type) LIKE '%YELLOW%' AND upper(me.event_type) NOT LIKE '%RED%' THEN -1
+                            WHEN upper(me.event_type) LIKE '%RED%' AND upper(me.event_type) NOT LIKE '%YELLOW%' THEN -3
+                            WHEN upper(me.event_type) LIKE '%YELLOW%' AND upper(me.event_type) LIKE '%RED%' THEN -4
+                            ELSE 0
+                        END)::int AS fair_play_score
+                    FROM match_events me
+                    JOIN matches m ON m.match_id = me.match_id
+                    JOIN competition_stages cs ON cs.stage_id = m.stage_id
+                      AND cs.stage_type = 'GROUP_STAGE'
+                    JOIN match_participants mp
+                      ON mp.match_id = me.match_id
+                     AND mp.team_id = me.team_id
+                     AND mp.participant_role = 'TEAM'
+                    WHERE m.competition_season_id = cast(:sid as uuid)
+                      AND me.team_id IS NOT NULL
+                    GROUP BY mp.team_id
+                """),
+                {"sid": competition_season_id},
+            )
+            return {row[0]: row[1] for row in result if row[0]}
+        except Exception as exc:
+            log.warning("standings_resolver: could not compute fair_play_scores: %s", exc)
+            return {}
+
     async def _get_group_stage_rules(self, competition_season_id: str) -> dict:
         result = await self.conn.execute(
             text("""
@@ -436,6 +484,7 @@ class StandingsResolver:
                         goal_difference     = :goal_difference,
                         points              = :points,
                         qualification_status = :qs,
+                        fair_play_score     = :fair_play_score,
                         as_of               = :as_of
                     WHERE competition_season_id = cast(:sid as uuid)
                       AND group_id              = cast(:gid as uuid)
@@ -455,6 +504,7 @@ class StandingsResolver:
                     "goal_difference": team.goal_difference,
                     "points": team.points,
                     "qs": team.qualification_status,
+                    "fair_play_score": team.fair_play_score,
                     "as_of": as_of,
                 },
             )

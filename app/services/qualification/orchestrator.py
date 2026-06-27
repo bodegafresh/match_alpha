@@ -15,7 +15,9 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.core.config import get_settings
 from app.core.time import iso_utc, utc_now
+from app.services.notifications.slack import notify_group_result
 from app.services.qualification.best_third_resolver import BestThirdPlaceResolver
 from app.services.qualification.models import QualificationResult
 from app.services.qualification.slot_resolver import TournamentSlotResolver
@@ -49,6 +51,19 @@ async def run_qualification_resolver(
             1 for t in standings_result.get("all_thirds", [])
             if "PENDING_TIEBREAKER" in (t.get("tiebreaker_notes") or [])
         )
+
+        # Send Slack notifications for fully-decided groups
+        settings = get_settings()
+        if settings.slack_webhook_url and standings_result.get("groups_processed", 0) > 0:
+            for group_info in standings_result.get("decided_groups", []):
+                await notify_group_result(
+                    settings.slack_webhook_url,
+                    group_info["group_code"],
+                    group_info["winner"],
+                    group_info["runner_up"],
+                    group_info["third"],
+                    group_info["eliminated"],
+                )
 
         await _write_event(
             conn,
