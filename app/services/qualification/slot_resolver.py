@@ -55,7 +55,7 @@ class TournamentSlotResolver:
 
         # Build assignment matrix mapping for best-third slots
         qualifying_groups = [
-            t["group_code"].replace("Grupo ", "").strip()
+            t["group_code"].strip()
             for t in best_thirds
             if t["qualification_status"] == "QUALIFIED_BEST_THIRD"
         ]
@@ -154,7 +154,7 @@ class TournamentSlotResolver:
                     (
                         t for t in best_thirds
                         if t["qualification_status"] == "QUALIFIED_BEST_THIRD"
-                        and t["group_code"].replace("Grupo ", "").strip().upper() == group_letter.upper()
+                        and t["group_code"].strip().upper() == group_letter.upper()
                         and not t.get("slot_assigned")
                     ),
                     None,
@@ -242,8 +242,8 @@ class TournamentSlotResolver:
         # group_standings values have group_code in each team row
         for gid, teams in group_standings.items():
             if teams:
-                code = (teams[0].get("group_code") or "").upper()
-                if code == letter or code == f"GRUPO {letter}":
+                code = (teams[0].get("group_code") or "").strip().upper()
+                if code == letter:
                     return gid
         return None
 
@@ -262,11 +262,11 @@ class TournamentSlotResolver:
         if not allowed_groups:
             return None
         # Normalize to uppercase letters only so "Grupo A" matches "A"
-        normalized_allowed = {g.replace("Grupo ", "").strip().upper() for g in allowed_groups}
+        normalized_allowed = {g.strip().upper() for g in allowed_groups}
         qualified = [
             t for t in best_thirds
             if t["qualification_status"] == "QUALIFIED_BEST_THIRD"
-            and t["group_code"].replace("Grupo ", "").strip().upper() in normalized_allowed
+            and t["group_code"].strip().upper() in normalized_allowed
             and not t.get("slot_assigned")
         ]
         if not qualified:

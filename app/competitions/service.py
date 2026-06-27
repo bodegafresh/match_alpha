@@ -216,6 +216,25 @@ async def _upsert_groups(
     if not group_stage_id:
         return
     for group in entry.groups:
+        # Remove any row with the same group_name but a different group_code format
+        # (e.g. "Grupo A" vs "A") to prevent duplicates when group_code format changes.
+        await conn.execute(
+            text(
+                """
+                delete from competition_groups
+                where competition_season_id = cast(:season_id as uuid)
+                  and stage_id = cast(:stage_id as uuid)
+                  and group_name = :group_name
+                  and group_code != :group_code
+                """
+            ),
+            {
+                "season_id": season_id,
+                "stage_id": group_stage_id,
+                "group_name": group.group_name,
+                "group_code": group.group_code,
+            },
+        )
         await conn.execute(
             text(
                 """
@@ -837,7 +856,7 @@ def _normalize_group_code(value: Any) -> str | None:
     if not raw:
         return None
     match = re.search(r"(?:group|grupo)\s*([a-l])", raw, flags=re.IGNORECASE) or re.match(r"^([A-L])$", raw, flags=re.IGNORECASE)
-    return f"Grupo {match.group(1).upper()}" if match else None
+    return match.group(1).upper() if match else None
 
 
 def _score(value: Any) -> int | None:
