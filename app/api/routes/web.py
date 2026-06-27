@@ -1,9 +1,13 @@
+import asyncio
 import re
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.config import get_settings
@@ -475,3 +479,126 @@ async def web_knockout(season: str | None = None, conn: AsyncConnection = Depend
         by_round[str(match["stage_code"])].append(match)
     data = {"season": {"slug": season_slug}, "rounds": dict(by_round), "matches": [_match_from_row(r) for r in rows], "generated_at": iso_utc()}
     return {"ok": True, "data": data}
+
+
+# ─── News ─────────────────────────────────────────────────────────────────────
+
+async def _fetch_team_news_rss(team_name: str, tournament: str = "FIFA World Cup 2026") -> list[dict]:
+    """Google News RSS — no API key needed. Returns list of {title, source, url}."""
+    query = f"{tournament} {team_name}"
+    articles: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+            r = await client.get(
+                "https://news.google.com/rss/search",
+                params={"q": query, "hl": "es", "gl": "US", "ceid": "US:es"},
+            )
+            if r.status_code != 200:
+                return articles
+            root = ET.fromstring(r.text)
+            channel = root.find("channel")
+            if channel is None:
+                return articles
+            seen: set[str] = set()
+            for item in channel.findall("item")[:6]:
+                title = item.findtext("title", "").strip()
+                link = item.findtext("link", "").strip()
+                pub_date = item.findtext("pubDate", "").strip()
+                source_el = item.find("{https://news.google.com/rss}source")
+                source = source_el.text if source_el is not None else "Google News"
+                if title and title not in seen:
+                    seen.add(title)
+                    articles.append({"title": title, "source": source, "url": link, "published_at": pub_date})
+    except Exception:
+        pass
+    return articles
+
+
+@router.get("/news")
+async def web_news(season: str | None = None, conn: AsyncConnection = Depends(get_connection)) -> dict:
+    """News for today's matches: one block per match with headlines per team.
+    Also returns the AI context used (whether AI adjustment ran for each match)."""
+    season_slug = season or get_settings().default_season_slug
+
+    # Fetch today's matches with team names
+    rows = await conn.execute(
+        text("""
+            SELECT
+              m.match_id::text,
+              m.kickoff_at,
+              m.status,
+              cs.stage_code,
+              home_t.display_name AS home_team,
+              home_t.slug         AS home_slug,
+              away_t.display_name AS away_team,
+              away_t.slug         AS away_slug,
+              m.home_score,
+              m.away_score
+            FROM matches m
+            JOIN competition_seasons cs2 ON cs2.competition_season_id = m.competition_season_id
+            JOIN competition_stages cs ON cs.stage_id = m.stage_id
+            JOIN match_participants hp ON hp.match_id = m.match_id AND hp.side = 'HOME'
+            JOIN teams home_t ON home_t.team_id = hp.team_id
+            JOIN match_participants ap ON ap.match_id = m.match_id AND ap.side = 'AWAY'
+            JOIN teams away_t ON away_t.team_id = ap.team_id
+            WHERE cs2.slug = :season
+              AND m.kickoff_at::date = CURRENT_DATE
+              AND m.status != 'CANCELLED'
+            ORDER BY m.kickoff_at ASC
+        """),
+        {"season": season_slug},
+    )
+    today_matches = [dict(r._mapping) for r in rows]
+
+    if not today_matches:
+        return {"ok": True, "data": {"matches_news": [], "generated_at": iso_utc()}}
+
+    # Check which matches have AI adjustments recorded in model_predictions payload
+    match_ids = [m["match_id"] for m in today_matches]
+    ai_rows = await conn.execute(
+        text("""
+            SELECT DISTINCT mp.match_id::text
+            FROM model_predictions mp
+            WHERE mp.match_id = ANY(cast(:ids as uuid[]))
+              AND mp.explanation::text ILIKE '%ai_adjustment%'
+        """),
+        {"ids": "{" + ",".join(match_ids) + "}"},
+    )
+    ai_adjusted_ids = {r[0] for r in ai_rows}
+
+    # Fetch news concurrently for all teams playing today
+    team_names = list({m["home_team"] for m in today_matches} | {m["away_team"] for m in today_matches})
+    news_tasks = [_fetch_team_news_rss(name) for name in team_names]
+    results = await asyncio.gather(*news_tasks, return_exceptions=True)
+    news_by_team: dict[str, list[dict]] = {}
+    for name, result in zip(team_names, results):
+        news_by_team[name] = result if isinstance(result, list) else []
+
+    matches_news = []
+    for m in today_matches:
+        home_news = news_by_team.get(m["home_team"], [])
+        away_news = news_by_team.get(m["away_team"], [])
+        # Merge and deduplicate by title
+        seen_titles: set[str] = set()
+        combined: list[dict] = []
+        for article in home_news + away_news:
+            if article["title"] not in seen_titles:
+                seen_titles.add(article["title"])
+                combined.append(article)
+
+        matches_news.append({
+            "match_id": m["match_id"],
+            "kickoff_at": iso_utc(m["kickoff_at"]),
+            "status": m["status"],
+            "stage_code": m["stage_code"],
+            "home_team": m["home_team"],
+            "away_team": m["away_team"],
+            "home_score": m["home_score"],
+            "away_score": m["away_score"],
+            "ai_context_used": m["match_id"] in ai_adjusted_ids,
+            "home_news": home_news[:4],
+            "away_news": away_news[:4],
+            "combined_news": combined[:8],
+        })
+
+    return {"ok": True, "data": {"matches_news": matches_news, "generated_at": iso_utc()}}
