@@ -60,7 +60,12 @@ class JobOrchestrator:
             OrchestratedJob("ev_decision", requires_predictions=True, requires_odds=True),
             OrchestratedJob("calibration_recompute", requires_finished_matches=True),
             OrchestratedJob("clv_compute", requires_finished_matches=True),
+            OrchestratedJob("drift_detection_full", requires_finished_matches=True),
             OrchestratedJob("pipeline_cleanup"),
+            # Phase 3 — triggered manually / CI only (NOT in daily auto-plan):
+            # OrchestratedJob("model_promotion")    → payload: {auto_promote: true}
+            # OrchestratedJob("backtest_walk_forward")
+
         ]
         return await self._run_plan("daily", plan, context)
 

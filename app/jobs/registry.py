@@ -25,6 +25,8 @@ from app.calibration.evaluator import run_calibration
 from app.feedback.clv_calculator import compute_pending_clv
 from app.feedback.settlement_service import settle_pending_decisions
 from app.models.poisson_predictor import _get_or_create_model_registry, run_poisson_prediction
+from app.models.drift_detector import detect_drift
+from app.models.lgbm.retraining_pipeline import run_retraining
 
 JobFn = Callable[[AsyncConnection, dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -524,6 +526,101 @@ async def clv_compute_job(conn: AsyncConnection, payload: dict[str, Any]) -> dic
     }
 
 
+async def drift_detection_full_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Detect distribution drift vs baseline for the champion model."""
+    settings = get_settings()
+
+    row = await conn.execute(
+        text("SELECT competition_season_id::text FROM competition_seasons WHERE slug = :slug LIMIT 1"),
+        {"slug": settings.default_season_slug},
+    )
+    r = row.fetchone()
+    if not r:
+        return {"status": "WARN", "job_name": "drift_detection_full", "records_processed": 0, "message": "season not found"}
+    season_id = r[0]
+
+    model_row = await conn.execute(
+        text("SELECT model_id::text FROM model_registry WHERE champion_status = 'CHAMPION' ORDER BY created_at DESC LIMIT 1")
+    )
+    mr = model_row.fetchone()
+    if not mr:
+        return {"status": "WARN", "job_name": "drift_detection_full", "records_processed": 0, "message": "no champion model"}
+
+    result = await detect_drift(conn, model_id=mr[0], competition_season_id=season_id)
+    return {
+        "status": result.get("status", "OK"),
+        "job_name": "drift_detection_full",
+        "records_processed": 1,
+        "severity": result.get("severity"),
+        "psi": result.get("psi"),
+        "brier_delta": result.get("brier_delta"),
+    }
+
+
+async def model_promotion_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Run LightGBM retraining pipeline and optionally auto-promote.
+    Triggered manually or by CI — NOT in the daily job plan by default.
+    payload: {auto_promote: bool}
+    """
+    settings = get_settings()
+    auto_promote = bool(payload.get("auto_promote", False))
+
+    row = await conn.execute(
+        text("SELECT competition_season_id::text FROM competition_seasons WHERE slug = :slug LIMIT 1"),
+        {"slug": settings.default_season_slug},
+    )
+    r = row.fetchone()
+    if not r:
+        return {"status": "WARN", "job_name": "model_promotion", "records_processed": 0, "message": "season not found"}
+    season_id = r[0]
+
+    result = await run_retraining(conn, competition_season_id=season_id, auto_promote=auto_promote)
+    return {
+        "status": result.get("status", "OK"),
+        "job_name": "model_promotion",
+        "records_processed": result.get("n_total", 0),
+        **result,
+    }
+
+
+async def backtest_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Run walk-forward backtesting on the champion model."""
+    from app.training.walk_forward import run_walk_forward
+    settings = get_settings()
+
+    row = await conn.execute(
+        text("SELECT competition_season_id::text FROM competition_seasons WHERE slug = :slug LIMIT 1"),
+        {"slug": settings.default_season_slug},
+    )
+    r = row.fetchone()
+    if not r:
+        return {"status": "WARN", "job_name": "backtest_walk_forward", "records_processed": 0, "message": "season not found"}
+    season_id = r[0]
+
+    model_row = await conn.execute(
+        text("SELECT model_id::text FROM model_registry WHERE champion_status = 'CHAMPION' ORDER BY created_at DESC LIMIT 1")
+    )
+    mr = model_row.fetchone()
+    if not mr:
+        return {"status": "WARN", "job_name": "backtest_walk_forward", "records_processed": 0, "message": "no champion model"}
+
+    result = await run_walk_forward(
+        conn,
+        model_id=mr[0],
+        competition_season_id=season_id,
+        window_days=int(payload.get("window_days", 90)),
+        test_days=int(payload.get("test_days", 30)),
+    )
+    return {
+        "status": result.get("status", "OK"),
+        "job_name": "backtest_walk_forward",
+        "records_processed": len(result.get("windows", [])),
+        "avg_brier": result.get("avg_brier"),
+        "windows": len(result.get("windows", [])),
+    }
+
+
 async def pipeline_cleanup_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
     """Deletes pipeline_runs older than 30 days to keep the table lean."""
     _ = payload
@@ -559,12 +656,14 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "standings_refresh": standings_refresh_job,
         "calibration_recompute": calibration_recompute_job,
         "clv_compute": clv_compute_job,
+        # Phase 3 — ML + drift + champion/challenger
+        "drift_detection_full": drift_detection_full_job,
+        "model_promotion": model_promotion_job,
+        "backtest_walk_forward": backtest_job,
     }
     scaffold_jobs = {
         "dataset_builder",
         "settlement",
-        "backtest_walk_forward",
-        "model_promotion",
     }
     obs = ObservabilityRepository(conn)
     pipeline_run_id = await obs.start_pipeline(job_name, {"runner": "fastapi", **payload})
