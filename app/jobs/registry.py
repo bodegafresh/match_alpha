@@ -148,46 +148,54 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
     _ = payload
     settings = get_settings()
 
-    # Get champion model or create it
-    model_id = await _get_or_create_model_registry(conn)
+    try:
+        model_id = await _get_or_create_model_registry(conn)
+    except Exception as exc:
+        return {"status": "ERROR", "job_name": "model_recompute", "records_processed": 0, "error": f"step=get_model_registry: {exc}"}
 
-    # Get season
-    row = await conn.execute(
-        text("SELECT competition_season_id::text FROM competition_seasons WHERE slug = :slug LIMIT 1"),
-        {"slug": settings.default_season_slug},
-    )
-    r = row.fetchone()
+    try:
+        row = await conn.execute(
+            text("SELECT competition_season_id::text FROM competition_seasons WHERE slug = :slug LIMIT 1"),
+            {"slug": settings.default_season_slug},
+        )
+        r = row.fetchone()
+    except Exception as exc:
+        return {"status": "ERROR", "job_name": "model_recompute", "records_processed": 0, "error": f"step=get_season: {exc}"}
     if not r:
         return {"status": "WARN", "job_name": "model_recompute", "records_processed": 0, "message": "season not found"}
     season_id = r[0]
 
-    # Get 1X2 market_id (required NOT NULL column)
-    mkt_row = await conn.execute(
-        text("SELECT market_id::text FROM markets WHERE market_code = '1X2' LIMIT 1")
-    )
-    mkt = mkt_row.fetchone()
+    try:
+        mkt_row = await conn.execute(
+            text("SELECT market_id::text FROM markets WHERE market_code = '1X2' LIMIT 1")
+        )
+        mkt = mkt_row.fetchone()
+    except Exception as exc:
+        return {"status": "ERROR", "job_name": "model_recompute", "records_processed": 0, "error": f"step=get_market: {exc}"}
     if not mkt:
         return {"status": "WARN", "job_name": "model_recompute", "records_processed": 0, "message": "1X2 market not found"}
     market_id_1x2 = mkt[0]
 
-    # Create model run
-    run_row = await conn.execute(
-        text("""
-            INSERT INTO model_runs (model_id, competition_season_id, market_id, run_status, prediction_as_of,
-                                    feature_set_version, dataset_version, params)
-            VALUES (cast(:model_id as uuid), cast(:season_id as uuid), cast(:market_id as uuid), 'STARTED', :as_of,
-                    'v1', 'v1', cast(:params as jsonb))
-            RETURNING model_run_id::text
-        """),
-        {
-            "model_id": model_id,
-            "season_id": season_id,
-            "market_id": market_id_1x2,
-            "as_of": utc_now(),
-            "params": json.dumps({"model": "poisson_elo_v1"}),
-        },
-    )
-    model_run_id = run_row.fetchone()[0]
+    try:
+        run_row = await conn.execute(
+            text("""
+                INSERT INTO model_runs (model_id, competition_season_id, market_id, run_status, prediction_as_of,
+                                        feature_set_version, dataset_version, params)
+                VALUES (cast(:model_id as uuid), cast(:season_id as uuid), cast(:market_id as uuid), 'STARTED', :as_of,
+                        'v1', 'v1', cast(:params as jsonb))
+                RETURNING model_run_id::text
+            """),
+            {
+                "model_id": model_id,
+                "season_id": season_id,
+                "market_id": market_id_1x2,
+                "as_of": utc_now(),
+                "params": json.dumps({"model": "poisson_elo_v1"}),
+            },
+        )
+        model_run_id = run_row.fetchone()[0]
+    except Exception as exc:
+        return {"status": "ERROR", "job_name": "model_recompute", "records_processed": 0, "error": f"step=insert_model_run: {exc}"}
 
     # Matches with feature snapshots but no predictions (next 14 days)
     matches = await conn.execute(
