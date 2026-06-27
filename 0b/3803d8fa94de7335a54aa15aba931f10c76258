@@ -1,0 +1,24 @@
+app/services/qualification/orchestrator.py
+  s_acedc47d393e24::t_1ba13a284d7aec 20
+  s_acedc47d393e24::t_8b94ee186e8a4c 55,57,60-61
+app/core/config.py
+  s_acedc47d393e24::t_e537c4238432a7 46-47
+app/services/notifications/telegram.py
+  s_acedc47d393e24::t_94dc0eeb6e96c0 1-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "0b3803d8fa94de7335a54aa15aba931f10c76258",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
