@@ -615,8 +615,13 @@ async def _promote_normalized_match(conn: AsyncConnection, season: dict[str, Any
             },
         )
         return False
-    home_score = _score(normalized.get("home_score"))
-    away_score = _score(normalized.get("away_score"))
+    match_status = normalized.get("status", "SCHEDULED")
+    # ESPN returns "0" as default score for unstarted matches — treat as NULL for SCHEDULED.
+    if match_status == "SCHEDULED":
+        home_score, away_score = None, None
+    else:
+        home_score = _score(normalized.get("home_score"))
+        away_score = _score(normalized.get("away_score"))
     home_team_id = match.get("home_team_id")
     away_team_id = match.get("away_team_id")
     winner_team_id = _winner_team_id(home_team_id, away_team_id, home_score, away_score, normalized.get("status"))

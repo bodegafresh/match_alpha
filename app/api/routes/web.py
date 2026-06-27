@@ -24,14 +24,14 @@ STAGE_LABELS = {
 }
 
 SPORTING_ASSOCIATION_FLAGS = {
-    "england": {"fifa_code": "ENG", "flag_emoji": "🏴", "flag_code": "ENG"},
-    "inglaterra": {"fifa_code": "ENG", "flag_emoji": "🏴", "flag_code": "ENG"},
+    "england": {"fifa_code": "ENG", "flag_emoji": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "flag_code": "ENG"},
+    "inglaterra": {"fifa_code": "ENG", "flag_emoji": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "flag_code": "ENG"},
     "scotland": {"fifa_code": "SCO", "flag_emoji": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "flag_code": "SCO"},
     "escocia": {"fifa_code": "SCO", "flag_emoji": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "flag_code": "SCO"},
     "wales": {"fifa_code": "WAL", "flag_emoji": "🏴󠁧󠁢󠁷󠁬󠁳󠁿", "flag_code": "WAL"},
     "gales": {"fifa_code": "WAL", "flag_emoji": "🏴󠁧󠁢󠁷󠁬󠁳󠁿", "flag_code": "WAL"},
-    "northern-ireland": {"fifa_code": "NIR", "flag_emoji": "🏴", "flag_code": "NIR"},
-    "irlanda-del-norte": {"fifa_code": "NIR", "flag_emoji": "🏴", "flag_code": "NIR"},
+    "northern-ireland": {"fifa_code": "NIR", "flag_emoji": "🏴󠁧󠁢󠁮󠁩󠁲󠁿", "flag_code": "NIR"},
+    "irlanda-del-norte": {"fifa_code": "NIR", "flag_emoji": "🏴󠁧󠁢󠁮󠁩󠁲󠁿", "flag_code": "NIR"},
 }
 
 
