@@ -196,7 +196,8 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
               m.match_id::text,
               home_p.team_id::text  AS home_team_id,
               away_p.team_id::text  AS away_team_id,
-              m.competition_season_id::text
+              m.competition_season_id::text,
+              m.kickoff_at
             FROM matches m
             JOIN match_participants home_p ON home_p.match_id = m.match_id AND home_p.side = 'HOME'
             JOIN match_participants away_p ON away_p.match_id = m.match_id AND away_p.side = 'AWAY'
@@ -553,7 +554,7 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
         text("""
             SELECT cs.competition_season_id::text, cs.slug
             FROM competition_seasons cs
-            WHERE cs.status = 'ACTIVE' OR cs.status = 'BETTABLE'
+            WHERE cs.status IN ('ACTIVE', 'SCHEDULED')
             LIMIT 5
         """)
     )

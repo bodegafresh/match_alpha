@@ -44,14 +44,13 @@ async def _get_match_context(conn: AsyncConnection, match_id: str) -> dict[str, 
               home_p.team_id::text  AS home_team_id,
               away_p.team_id::text  AS away_team_id,
               st.stage_type,
-              coalesce(v.is_neutral, false) AS is_neutral
+              false AS is_neutral
             FROM matches m
             JOIN match_participants home_p
               ON home_p.match_id = m.match_id AND home_p.side = 'HOME'
             JOIN match_participants away_p
               ON away_p.match_id = m.match_id AND away_p.side = 'AWAY'
             LEFT JOIN competition_stages st ON st.stage_id = m.stage_id
-            LEFT JOIN venues v ON v.venue_id = m.venue_id
             WHERE m.match_id = cast(:match_id as uuid)
         """),
         {"match_id": match_id},

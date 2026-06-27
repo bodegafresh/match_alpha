@@ -57,7 +57,7 @@ class JobOrchestrator:
             OrchestratedJob("elo_ratings_update", requires_finished_matches=True),
             OrchestratedJob("feature_snapshot_build", requires_upcoming_matches=True),
             OrchestratedJob("model_recompute", requires_upcoming_matches=True),
-            OrchestratedJob("ev_decision", requires_predictions=True, requires_odds=True),
+            OrchestratedJob("ev_decision", requires_predictions=True, requires_odds=False),
             OrchestratedJob("calibration_recompute", requires_finished_matches=True),
             OrchestratedJob("clv_compute", requires_finished_matches=True),
             OrchestratedJob("drift_detection_full", requires_finished_matches=True),
