@@ -173,76 +173,23 @@ async def _fetch_weather(venue_city: str | None, venue_country: str | None) -> d
     return {}
 
 
-async def _fetch_news_rss(home_team: str, away_team: str) -> list[str]:
-    """Google News RSS — no API key required."""
-    import xml.etree.ElementTree as ET
-    queries = [f"world cup 2026 {home_team}", f"world cup 2026 {away_team}"]
-    seen: set[str] = set()
-    headlines: list[str] = []
+async def _fetch_news(conn: AsyncConnection, match_id: str) -> list[str]:
+    """Read pre-fetched news from news_items table (populated by GAS via /web/news/ingest)."""
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            for q in queries:
-                r = await client.get(
-                    "https://news.google.com/rss/search",
-                    params={"q": q, "hl": "en", "gl": "US", "ceid": "US:en"},
-                    follow_redirects=True,
-                )
-                if r.status_code != 200:
-                    continue
-                root = ET.fromstring(r.text)
-                channel = root.find("channel")
-                if channel is None:
-                    continue
-                for item in channel.findall("item")[:5]:
-                    title = item.findtext("title", "").strip()
-                    source_el = item.find("{https://news.google.com/rss}source")
-                    source = source_el.text if source_el is not None else "Google News"
-                    if title and title not in seen:
-                        seen.add(title)
-                        headlines.append(f"- {title} ({source})")
+        rows = await conn.execute(
+            text("""
+                SELECT title, source
+                FROM news_items
+                WHERE match_id = cast(:mid as uuid)
+                ORDER BY pub_date DESC NULLS LAST
+                LIMIT 12
+            """),
+            {"mid": match_id},
+        )
+        return [f"- {r.title} ({r.source})" for r in rows]
     except Exception as exc:
-        log.debug("google news rss fetch failed: %s", exc)
-    return headlines
-
-
-async def _fetch_news_api(home_team: str, away_team: str) -> list[str]:
-    """NewsAPI — requires NEWS_API_KEY env var."""
-    settings = get_settings()
-    if not settings.news_api_key:
+        log.debug("news_items fetch failed: %s", exc)
         return []
-    try:
-        query = f"FIFA World Cup 2026 {home_team} {away_team}"
-        async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.get(
-                "https://newsapi.org/v2/everything",
-                params={"q": query, "apiKey": settings.news_api_key,
-                        "language": "en", "sortBy": "publishedAt", "pageSize": 8},
-            )
-            if r.status_code == 200:
-                articles = r.json().get("articles", [])
-                return [
-                    f"- {a.get('title', '')} ({a.get('source', {}).get('name', 'NewsAPI')})"
-                    for a in articles[:8] if a.get("title")
-                ]
-    except Exception as exc:
-        log.debug("newsapi fetch failed: %s", exc)
-    return []
-
-
-async def _fetch_news(home_team: str, away_team: str) -> list[str]:
-    """Merge Google News RSS + NewsAPI (if key set), deduplicated."""
-    import asyncio
-    rss_results, api_results = await asyncio.gather(
-        _fetch_news_rss(home_team, away_team),
-        _fetch_news_api(home_team, away_team),
-    )
-    seen: set[str] = set()
-    merged: list[str] = []
-    for h in rss_results + api_results:
-        if h not in seen:
-            seen.add(h)
-            merged.append(h)
-    return merged[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +483,7 @@ async def adjust_predictions_with_ai(
         log.debug("context fetch partial failure: %s", exc)
 
     weather = await _fetch_weather(match.get("venue_city"), match.get("venue_country"))
-    news = await _fetch_news(match.get("home_team", ""), match.get("away_team", ""))
+    news = await _fetch_news(conn, match_id)
 
     messages = _build_prompt(match, raw_probs, odds, standings, features, weather, news)
     ai_result = await _call_openai(messages, raw_probs)

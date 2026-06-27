@@ -3,7 +3,8 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -480,10 +481,102 @@ async def web_knockout(season: str | None = None, conn: AsyncConnection = Depend
 
 # ─── News ─────────────────────────────────────────────────────────────────────
 
+# ---------------------------------------------------------------------------
+# News ingest (called by GAS after fetching RSS)
+# ---------------------------------------------------------------------------
+
+class NewsItemIn(BaseModel):
+    id_hash: str
+    match_id: str | None = None
+    home_team: str
+    away_team: str
+    title: str
+    url: str
+    source: str = "Google News RSS"
+    pub_date: str | None = None  # ISO or RFC 2822 string
+
+
+@router.post("/news/ingest")
+async def news_ingest(
+    items: list[NewsItemIn],
+    x_internal_key: str | None = Header(default=None, alias="X-Internal-Key"),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
+    """Receive news items from GAS and upsert into news_items table.
+    Authenticated with X-Internal-Key header."""
+    settings = get_settings()
+    if x_internal_key != settings.internal_job_key:
+        raise HTTPException(status_code=401, detail="Invalid internal key")
+    if not items:
+        return {"ok": True, "inserted": 0}
+
+    inserted = 0
+    for item in items:
+        # Resolve match_id from home/away team names if not provided
+        match_id = item.match_id
+        if not match_id:
+            res = await conn.execute(
+                text("""
+                    SELECT m.match_id::text
+                    FROM matches m
+                    JOIN match_participants hp ON hp.match_id = m.match_id AND hp.side = 'HOME'
+                    JOIN teams ht ON ht.team_id = hp.team_id
+                    JOIN match_participants ap ON ap.match_id = m.match_id AND ap.side = 'AWAY'
+                    JOIN teams at ON at.team_id = ap.team_id
+                    WHERE ht.display_name ILIKE :home
+                      AND at.display_name ILIKE :away
+                      AND m.kickoff_at::date >= CURRENT_DATE - interval '1 day'
+                    ORDER BY m.kickoff_at ASC
+                    LIMIT 1
+                """),
+                {"home": f"%{item.home_team}%", "away": f"%{item.away_team}%"},
+            )
+            row = res.fetchone()
+            match_id = row[0] if row else None
+
+        pub_date = None
+        if item.pub_date:
+            from email.utils import parsedate_to_datetime
+            try:
+                pub_date = parsedate_to_datetime(item.pub_date).isoformat()
+            except Exception:
+                pub_date = item.pub_date  # pass through ISO strings as-is
+
+        result = await conn.execute(
+            text("""
+                INSERT INTO news_items (id_hash, match_id, home_team, away_team,
+                                        title, url, source, pub_date)
+                VALUES (:id_hash,
+                        cast(:match_id as uuid),
+                        :home_team, :away_team,
+                        :title, :url, :source,
+                        cast(:pub_date as timestamptz))
+                ON CONFLICT (id_hash) DO NOTHING
+            """),
+            {
+                "id_hash": item.id_hash,
+                "match_id": match_id,
+                "home_team": item.home_team,
+                "away_team": item.away_team,
+                "title": item.title,
+                "url": item.url,
+                "source": item.source,
+                "pub_date": pub_date,
+            },
+        )
+        inserted += result.rowcount
+
+    await conn.commit()
+    return {"ok": True, "inserted": inserted, "total": len(items)}
+
+
+# ---------------------------------------------------------------------------
+# News read (frontend + internal)
+# ---------------------------------------------------------------------------
+
 @router.get("/news")
 async def web_news(season: str | None = None, conn: AsyncConnection = Depends(get_connection)) -> dict:
-    """Today's matches with team names + AI context flag.
-    RSS news fetching is handled client-side to avoid server IP blocks."""
+    """Today's matches with team names, AI context flag, and cached news from news_items."""
     season_slug = season or get_settings().default_season_slug
 
     rows = await conn.execute(
@@ -517,6 +610,9 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
         return {"ok": True, "data": {"matches_news": [], "generated_at": iso_utc()}}
 
     match_ids = [m["match_id"] for m in today_matches]
+    id_array = "{" + ",".join(match_ids) + "}"
+
+    # AI context: matches that had AI adjustment applied
     ai_rows = await conn.execute(
         text("""
             SELECT DISTINCT mp.match_id::text
@@ -524,9 +620,31 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
             WHERE mp.match_id = ANY(cast(:ids as uuid[]))
               AND mp.explanation::text ILIKE '%ai_adjustment%'
         """),
-        {"ids": "{" + ",".join(match_ids) + "}"},
+        {"ids": id_array},
     )
     ai_adjusted_ids = {r[0] for r in ai_rows}
+
+    # News from cache
+    news_rows = await conn.execute(
+        text("""
+            SELECT match_id::text, title, url, source,
+                   pub_date, home_team, away_team
+            FROM news_items
+            WHERE match_id = ANY(cast(:ids as uuid[]))
+            ORDER BY pub_date DESC NULLS LAST
+        """),
+        {"ids": id_array},
+    )
+    news_by_match: dict[str, list[dict]] = defaultdict(list)
+    for r in news_rows:
+        news_by_match[r.match_id].append({
+            "title": r.title,
+            "url": r.url,
+            "source": r.source,
+            "published_at": iso_utc(r.pub_date) if r.pub_date else None,
+            "home_team": r.home_team,
+            "away_team": r.away_team,
+        })
 
     matches_news = [
         {
@@ -539,6 +657,7 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
             "home_score": m["home_score"],
             "away_score": m["away_score"],
             "ai_context_used": m["match_id"] in ai_adjusted_ids,
+            "news": news_by_match.get(m["match_id"], [])[:10],
         }
         for m in today_matches
     ]
