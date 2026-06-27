@@ -95,10 +95,6 @@ function runDailyBackendOrchestration() {
 
   var result = backendFetch_('/api/v1/jobs/orchestrate/daily', { method: 'post', payload: { source: 'gas_daily' } });
 
-  // Fetchear noticias desde Google News RSS y pushear al backend
-  // (GAS puede acceder a Google News; Render está bloqueado)
-  try { runNewsSync(); } catch (e) { Logger.log('runNewsSync error: ' + e.message); }
-
   // Marcar como ejecutado solo si el backend respondió sin error 5xx
   if (result.ok || (result.status_code && result.status_code < 500)) {
     props.setProperty(MATCH_ALPHA_CRON_PROPS.DAILY_RAN_DATE, today);
@@ -179,12 +175,23 @@ function checkBackendLatestStatus() {
 // ─── GESTIÓN DE TRIGGERS ──────────────────────────────────────────────────────
 
 /**
+ * runNewsSyncJob — trigger independiente para fetchear RSS de Google News.
+ * Corre 1 hora antes del daily (5 AM UTC) para que las noticias estén
+ * disponibles cuando el pipeline diario genere predicciones y resúmenes AI.
+ * Se puede forzar manualmente desde el editor GAS.
+ */
+function runNewsSyncJob() {
+  return logBackendCronResult_('runNewsSyncJob', runNewsSync());
+}
+
+/**
  * installMatchAlphaTriggers — correr UNA SOLA VEZ para configurar los triggers.
  *
  * Intervalos:
  *   - Keepalive: 10 min  (Render Free duerme a los 15 min de inactividad)
- *   - Live:       5 min  (actualización frecuente de slots/standings durante partidos)
- *   - Daily:      1 hora (con guard interno de hora+idempotencia, corre 1 vez/día)
+ *   - News:       1 hora (5 AM UTC — antes del daily, para que AI las lea)
+ *   - Daily:      1 hora (6 AM UTC con guard interno de hora+idempotencia)
+ *   - Live:       5 min  (actualización frecuente durante partidos WC2026)
  */
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();
@@ -194,6 +201,14 @@ function installMatchAlphaTriggers() {
   var keepalive = ScriptApp.newTrigger('pingBackendKeepAlive')
     .timeBased()
     .everyMinutes(10)
+    .create();
+
+  // News sync: 5 AM UTC (hora antes del daily a las 6 AM UTC)
+  var news = ScriptApp.newTrigger('runNewsSyncJob')
+    .timeBased()
+    .atHour(5)
+    .everyDays(1)
+    .inTimezone('UTC')
     .create();
 
   var daily = ScriptApp.newTrigger('runDailyBackendOrchestration')
@@ -208,13 +223,15 @@ function installMatchAlphaTriggers() {
 
   var props = PropertiesService.getScriptProperties();
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'KEEPALIVE', keepalive.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'NEWS', news.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=10min daily=1h live=5min');
+  Logger.log('Triggers instalados: keepalive=10min news=5AM-UTC daily=1h live=5min');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
+    news_trigger_id: news.getUniqueId(),
     daily_trigger_id: daily.getUniqueId(),
     live_trigger_id: live.getUniqueId()
   };
@@ -223,6 +240,7 @@ function installMatchAlphaTriggers() {
 function removeMatchAlphaTriggers() {
   var handlers = {
     pingBackendKeepAlive: true,
+    runNewsSyncJob: true,
     runDailyBackendOrchestration: true,
     runLiveBackendOrchestration: true,
     checkBackendLatestStatus: true,
@@ -237,6 +255,7 @@ function removeMatchAlphaTriggers() {
 
   var props = PropertiesService.getScriptProperties();
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'KEEPALIVE');
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'NEWS');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE');
 
