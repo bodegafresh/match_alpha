@@ -1,0 +1,9 @@
+cloudflare/**
+web/**
+docs/**
+.git/**
+*.md
+*.toml
+package.json
+package-lock.json
+.clasp.json
