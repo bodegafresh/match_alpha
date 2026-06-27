@@ -71,8 +71,7 @@ class BettingRepository(Repository):
               ev = excluded.ev,
               kelly_fraction = excluded.kelly_fraction,
               stake_fraction = excluded.stake_fraction,
-              payload = excluded.payload,
-              updated_at = now()
+              payload = excluded.payload
             returning betting_decision_id::text
             """,
             {
