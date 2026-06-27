@@ -837,7 +837,7 @@ def _normalize_group_code(value: Any) -> str | None:
     if not raw:
         return None
     match = re.search(r"(?:group|grupo)\s*([a-l])", raw, flags=re.IGNORECASE) or re.match(r"^([A-L])$", raw, flags=re.IGNORECASE)
-    return f"Grupo {match.group(1).upper()}" if match else None
+    return match.group(1).upper() if match else None
 
 
 def _score(value: Any) -> int | None:
