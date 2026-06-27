@@ -154,12 +154,7 @@ async def _upsert_prediction(
               '{}',
               cast(:payload as jsonb)
             )
-            ON CONFLICT (model_run_id, match_id, market_id, selection_id, line, as_of) NULLS NOT DISTINCT
-            DO UPDATE SET
-              raw_probability = excluded.raw_probability,
-              fair_odds       = excluded.fair_odds,
-              explanation     = excluded.explanation,
-              as_of           = excluded.as_of
+            ON CONFLICT DO NOTHING
             RETURNING prediction_id::text
         """),
         {
@@ -176,7 +171,8 @@ async def _upsert_prediction(
             "as_of": as_of,
         },
     )
-    return row.fetchone()[0]
+    r = row.fetchone()
+    return r[0] if r else None
 
 
 async def run_poisson_prediction(

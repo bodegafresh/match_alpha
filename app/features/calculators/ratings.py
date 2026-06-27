@@ -99,8 +99,7 @@ async def upsert_rating_snapshot(
         text("""
             INSERT INTO rating_snapshots (competition_season_id, team_id, rating_type, rating_value, as_of)
             VALUES (cast(:cs_id as uuid), cast(:team_id as uuid), :rating_type, :rating_value, :as_of)
-            ON CONFLICT (competition_season_id, team_id, rating_type, as_of) NULLS NOT DISTINCT
-            DO UPDATE SET rating_value = excluded.rating_value
+            ON CONFLICT DO NOTHING
         """),
         {
             "cs_id": competition_season_id,
