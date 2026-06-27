@@ -653,7 +653,8 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
             JOIN match_participants ap ON ap.match_id = m.match_id AND ap.side = 'AWAY'
             JOIN teams away_t ON away_t.team_id = ap.team_id
             WHERE cs2.slug = :season
-              AND m.kickoff_at::date = CURRENT_DATE
+              AND m.kickoff_at >= now() - interval '4 hours'
+              AND m.kickoff_at <  now() + interval '28 hours'
               AND m.status != 'CANCELLED'
             ORDER BY m.kickoff_at ASC
         """),
