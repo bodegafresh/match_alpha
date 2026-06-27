@@ -72,9 +72,12 @@ function runDailyBackendOrchestration() {
     return logBackendCronResult_('runDailyBackendOrchestration', { ok: false, skipped: true, reason: 'DAILY_JOB_DISABLED' });
   }
 
-  // Guard de hora: solo correr en la hora UTC configurada
+  // Guard de hora: corre en ventana de 3 horas desde DAILY_HOUR_UTC
+  // (permite que Render despierte si estaba dormido a la hora exacta)
   var nowUtcHour = new Date().getUTCHours();
-  if (nowUtcHour !== config.DAILY_HOUR_UTC) {
+  var startHour = config.DAILY_HOUR_UTC;
+  var inWindow = (nowUtcHour >= startHour && nowUtcHour < startHour + 3);
+  if (!inWindow) {
     return logBackendCronResult_('runDailyBackendOrchestration', {
       ok: false, skipped: true, reason: 'WRONG_HOUR', utc_hour: nowUtcHour
     });
