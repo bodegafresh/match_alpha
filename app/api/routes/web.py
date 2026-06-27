@@ -356,7 +356,10 @@ async def web_standings(season: str | None = None, conn: AsyncConnection = Depen
         )
         if row.get("team_id"):
             grouped[group_id]["standings"].append(_serialize_row(row))
-    return {"ok": True, "data": {"season": {"slug": season_slug}, "groups": list(grouped.values()), "generated_at": iso_utc()}}
+    groups_list = sorted(grouped.values(), key=lambda g: g.get("group_order") or 0)
+    for g in groups_list:
+        g["standings"].sort(key=lambda r: r.get("position") or 99)
+    return {"ok": True, "data": {"season": {"slug": season_slug}, "groups": groups_list, "generated_at": iso_utc()}}
 
 
 @router.get("/teams")
