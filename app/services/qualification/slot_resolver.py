@@ -110,15 +110,6 @@ class TournamentSlotResolver:
         slot_code = slot["slot_code"]
         slot_label = slot["slot_label"]
 
-        # ── Already resolved and not being overridden
-        if slot.get("resolved_team_id"):
-            return SlotResolution(
-                slot_id=slot_id, slot_code=slot_code, slot_label=slot_label,
-                resolved_team_id=slot["resolved_team_id"],
-                status=SLOT_STATUS_RESOLVED, reason="already_resolved",
-                source="tournament_slots",
-            )
-
         source_group_id = slot.get("source_group_id")
         source_rank = slot.get("source_rank")
         source_match_id = slot.get("source_match_id")
