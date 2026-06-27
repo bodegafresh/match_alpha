@@ -297,7 +297,7 @@ class JobOrchestrator:
     def _window(self, orchestration_name: str) -> str:
         now = utc_now()
         if orchestration_name == "live":
-            minute_window = (now.minute // 15) * 15
+            minute_window = (now.minute // 5) * 5
             return now.replace(minute=minute_window, second=0, microsecond=0).isoformat()
         return now.date().isoformat()
 

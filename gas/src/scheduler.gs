@@ -24,7 +24,7 @@
 var MATCH_ALPHA_CRON_CONFIG = {
   BACKEND_BASE_URL:         'https://YOUR_RENDER_SERVICE.onrender.com',
   API_INTERNAL_KEY:         'SET_IN_SCRIPT_PROPERTIES',
-  MAX_FETCH_PER_DAY:        400,
+  MAX_FETCH_PER_DAY:        500,
   KEEPALIVE_ENABLED:        true,
   DAILY_JOB_ENABLED:        true,
   LIVE_JOB_ENABLED:         true,
@@ -110,7 +110,7 @@ function runDailyBackendOrchestration() {
 }
 
 /**
- * runLiveBackendOrchestration — configurar cada 15 minutos.
+ * runLiveBackendOrchestration — configurar cada 5 minutos.
  * Solo corre durante la ventana de partidos (WC2026).
  * El backend decide internamente si hay partidos activos y cuáles jobs ejecutar.
  */
@@ -177,10 +177,10 @@ function checkBackendLatestStatus() {
 /**
  * installMatchAlphaTriggers — correr UNA SOLA VEZ para configurar los triggers.
  *
- * Intervalos corregidos vs versión anterior:
- *   - Keepalive: 14 min  (antes 30 — Render Free dormía entre cada ping)
- *   - Live:      15 min  (antes 30 — se perdían actualizaciones de live scores)
- *   - Daily:      1 hora (igual, con guard interno de hora+idempotencia)
+ * Intervalos:
+ *   - Keepalive: 10 min  (Render Free duerme a los 15 min de inactividad)
+ *   - Live:       5 min  (actualización frecuente de slots/standings durante partidos)
+ *   - Daily:      1 hora (con guard interno de hora+idempotencia, corre 1 vez/día)
  */
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();
@@ -199,7 +199,7 @@ function installMatchAlphaTriggers() {
 
   var live = ScriptApp.newTrigger('runLiveBackendOrchestration')
     .timeBased()
-    .everyMinutes(15)
+    .everyMinutes(5)
     .create();
 
   var props = PropertiesService.getScriptProperties();
@@ -207,7 +207,7 @@ function installMatchAlphaTriggers() {
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=14min daily=1h live=15min');
+  Logger.log('Triggers instalados: keepalive=10min daily=1h live=5min');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
