@@ -382,8 +382,13 @@ async def worldcup_live_refresh(conn: AsyncConnection, competition: str | None =
     entry = get_catalog_entry(competition or settings.default_season_slug)
     await seed_competition_catalog(conn, entry.slug)
     season = await _season_row(conn, entry.slug)
-    today = utc_now().date().isoformat()
-    result = await _sync_espn_scoreboard_window(conn, entry, season, [today])
+    now = utc_now()
+    today = now.date().isoformat()
+    # Also fetch yesterday in UTC so late-night matches (e.g. 23:00 Chile = 02:00 UTC next day)
+    # are still updated when the live refresh runs past midnight UTC.
+    yesterday = (now.date() - timedelta(days=1)).isoformat()
+    dates = [yesterday, today] if now.hour < 6 else [today]
+    result = await _sync_espn_scoreboard_window(conn, entry, season, dates)
     return {
         "status": result.get("status", "WARN"),
         "job_name": "worldcup_live_refresh",
