@@ -1,0 +1,20 @@
+scripts/validate_integrity.sql
+  s_acedc47d393e24::t_a0d7e602b91a18 1-249,251-260
+  s_acedc47d393e24::t_16b61b7ca06c91 250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "993524e01cc6fc17c267c7af87aebffc37669cee",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
