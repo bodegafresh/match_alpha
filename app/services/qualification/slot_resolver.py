@@ -114,16 +114,12 @@ class TournamentSlotResolver:
         source_rank = slot.get("source_rank")
         source_match_id = slot.get("source_match_id")
 
-        # ── Already resolved with no re-resolution source data
-        # (source_group_id and source_match_id both absent means we can't re-verify)
-        if slot.get("resolved_team_id") and not source_group_id and not source_match_id:
-            log.warning("slot %s has resolved_team_id but no source data — keeping cached value", slot_code)
-            return SlotResolution(
-                slot_id=slot_id, slot_code=slot_code, slot_label=slot_label,
-                resolved_team_id=slot["resolved_team_id"],
-                status=SLOT_STATUS_RESOLVED, reason="already_resolved_no_source",
-                source="tournament_slots",
-            )
+        # ── Derive group_id from slot_code when source_group_id is missing
+        # e.g. "group_b_2nd_place" → letter "b" → look up "Grupo B" in standings
+        if not source_group_id and source_rank and not source_match_id:
+            source_group_id = self._group_id_from_slot_code(slot_code, group_standings)
+            if source_group_id:
+                log.debug("slot %s: derived source_group_id from slot_code", slot_code)
 
         # ── Group winner / runner-up
         if source_group_id and source_rank and source_rank <= 2:
@@ -231,6 +227,27 @@ class TournamentSlotResolver:
                 return t
         return None
 
+    def _group_id_from_slot_code(
+        self, slot_code: str, group_standings: dict[str, list[dict]]
+    ) -> str | None:
+        """
+        Derive group_id from slot_code pattern like 'group_b_2nd_place'.
+        Extracts the letter after 'group_' and matches against group_code in standings.
+        """
+        import re
+        m = re.match(r"^group_([a-z])_", slot_code)
+        if not m:
+            return None
+        letter = m.group(1).upper()
+        # group_standings values have group_code in each team row
+        for gid, teams in group_standings.items():
+            if teams:
+                code = (teams[0].get("group_code") or "").upper()
+                # group_code can be "Grupo B" or just "B"
+                if code == letter or code == f"GRUPO {letter}":
+                    return gid
+        return None
+
     def _find_best_third(
         self, best_thirds: list[dict], allowed_groups: list[str]
     ) -> dict | None:
@@ -335,8 +352,10 @@ class TournamentSlotResolver:
                     s.points,
                     s.goal_difference,
                     s.goals_for,
-                    s.qualification_status
+                    s.qualification_status,
+                    cg.group_code
                 FROM standings s
+                JOIN competition_groups cg ON cg.group_id = s.group_id
                 WHERE s.competition_season_id = cast(:sid as uuid)
                   AND s.group_id IS NOT NULL
                 ORDER BY s.group_id, s.team_id, s.as_of DESC NULLS LAST
