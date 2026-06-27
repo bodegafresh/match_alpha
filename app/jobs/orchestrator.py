@@ -169,15 +169,23 @@ class JobOrchestrator:
 
                 try:
                     logger.info("orchestrated job starting job=%s orchestrator=%s window=%s", item.name, orchestration_name, window)
-                    result = await run_registered_job(
-                        item.name,
-                        self.conn,
-                        {
-                            "orchestrator": orchestration_name,
-                            "idempotency_key": f"{item.name}:{window}",
-                            "orchestrator_version": ORCHESTRATOR_VERSION,
-                        },
-                    )
+                    # Each job runs inside its own savepoint so a DBAPIError in one job
+                    # does not abort the outer transaction and cascade to subsequent jobs.
+                    async with self.conn.begin_nested() as sp:
+                        try:
+                            result = await run_registered_job(
+                                item.name,
+                                self.conn,
+                                {
+                                    "orchestrator": orchestration_name,
+                                    "idempotency_key": f"{item.name}:{window}",
+                                    "orchestrator_version": ORCHESTRATOR_VERSION,
+                                },
+                            )
+                            await sp.commit()
+                        except Exception:
+                            await sp.rollback()
+                            raise
                     status = str(result.get("status", "OK")).upper()
                     records = int(result.get("records_processed") or 0)
                     records_updated += records
