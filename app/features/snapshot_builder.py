@@ -143,7 +143,10 @@ async def _upsert_feature_snapshot(conn: AsyncConnection, data: dict[str, Any]) 
               cast(:features as jsonb),
               :source_hash
             )
-            ON CONFLICT ON CONSTRAINT uq_feature_snapshots_key
+            ON CONFLICT (competition_season_id,
+              coalesce(match_id, '00000000-0000-0000-0000-000000000000'::uuid),
+              coalesce(team_id,  '00000000-0000-0000-0000-000000000000'::uuid),
+              feature_set_version, as_of)
             DO UPDATE SET
               elo_global           = excluded.elo_global,
               elo_international    = excluded.elo_international,

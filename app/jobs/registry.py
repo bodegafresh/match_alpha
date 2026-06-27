@@ -568,7 +568,7 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
         ref_row = await conn.execute(
             text("""
                 SELECT source_entity_id FROM entity_external_refs
-                WHERE entity_type = 'competition_season'
+                WHERE entity_type = 'COMPETITION_SEASON'
                   AND entity_id = cast(:season_id as uuid)
                   AND source = 'FOOTBALL_DATA'
                 LIMIT 1
@@ -591,7 +591,7 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
                 team_ref = await conn.execute(
                     text("""
                         SELECT entity_id::text FROM entity_external_refs
-                        WHERE source = 'FOOTBALL_DATA' AND source_entity_id = :tid AND entity_type = 'team'
+                        WHERE source = 'FOOTBALL_DATA' AND source_entity_id = :tid AND entity_type = 'TEAM'
                         LIMIT 1
                     """),
                     {"tid": source_team_id},
