@@ -622,6 +622,10 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
             if g:
                 group_id = g[0]
 
+        if not group_id:
+            # Cannot resolve group — skip entire block to avoid null-group rows
+            continue
+
         for entry in (group_standing.get("table") or []):
             source_team_id = str(entry["team"]["id"])
             team_ref = await conn.execute(
@@ -637,32 +641,33 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
                 continue
             team_id = tr[0]
 
-            # Insert with group_id so the query can join correctly.
-            # ON CONFLICT excludes as_of — each (season, group, team) has one
-            # current standings row, updated in-place on each refresh run.
+            # The unique index includes as_of, so ON CONFLICT never fires when
+            # as_of changes between runs — it would always INSERT a new row.
+            # Fix: DELETE the existing row for this (season, group, team) first,
+            # then INSERT fresh. No accumulation, no dependency on as_of index.
+            await conn.execute(
+                text("""
+                    DELETE FROM standings
+                    WHERE competition_season_id = cast(:season_id as uuid)
+                      AND group_id = cast(:group_id as uuid)
+                      AND team_id = cast(:team_id as uuid)
+                """),
+                {"season_id": season["competition_season_id"], "group_id": group_id, "team_id": team_id},
+            )
             await conn.execute(
                 text("""
                     INSERT INTO standings (
                       competition_season_id, group_id, team_id, position,
                       played, wins, draws, losses,
-                      goals_for, goals_against, goal_difference, points, as_of
+                      goals_for, goals_against, goal_difference, points, as_of,
+                      source
                     )
                     VALUES (
                       cast(:season_id as uuid), cast(:group_id as uuid), cast(:team_id as uuid), :position,
                       :played, :wins, :draws, :losses,
-                      :gf, :ga, :gd, :points, :as_of
+                      :gf, :ga, :gd, :points, :as_of,
+                      'FOOTBALL_DATA'
                     )
-                    ON CONFLICT (competition_season_id,
-                      coalesce(stage_id, '00000000-0000-0000-0000-000000000000'::uuid),
-                      coalesce(group_id, '00000000-0000-0000-0000-000000000000'::uuid),
-                      team_id, as_of)
-                    DO UPDATE SET
-                      position = excluded.position,
-                      played = excluded.played, wins = excluded.wins,
-                      draws = excluded.draws, losses = excluded.losses,
-                      goals_for = excluded.goals_for, goals_against = excluded.goals_against,
-                      goal_difference = excluded.goal_difference, points = excluded.points,
-                      as_of = excluded.as_of
                 """),
                 {
                     "season_id": season["competition_season_id"],
