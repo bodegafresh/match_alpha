@@ -843,6 +843,34 @@ async def pipeline_cleanup_job(conn: AsyncConnection, payload: dict[str, Any]) -
     return {"status": "OK", "job_name": "pipeline_cleanup", "records_processed": deleted}
 
 
+async def qualification_resolver_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    from app.services.qualification.orchestrator import (
+        get_active_season_id,
+        run_qualification_resolver,
+    )
+
+    season_slug = payload.get("season_slug") or "wc2026"
+    season_id = payload.get("competition_season_id")
+
+    if not season_id:
+        season_id = await get_active_season_id(conn, season_slug)
+    if not season_id:
+        return {"status": "SKIPPED", "reason": f"no active season for slug={season_slug}", "records_processed": 0}
+
+    result = await run_qualification_resolver(conn, season_id)
+    return {
+        "status": "ERROR" if result.errors else "OK",
+        "records_processed": result.slots_resolved + result.groups_processed,
+        "groups_processed": result.groups_processed,
+        "slots_resolved": result.slots_resolved,
+        "slots_pending": result.slots_pending,
+        "thirds_qualified": result.thirds_qualified,
+        "tiebreakers_pending": result.tiebreakers_pending,
+        "events_written": result.events_written,
+        "errors": result.errors,
+    }
+
+
 async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     jobs: dict[str, JobFn] = {
@@ -861,6 +889,7 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "model_recompute": model_recompute_job,
         "odds_refresh": odds_refresh_job,
         "standings_refresh": standings_refresh_job,
+        "qualification_resolver": qualification_resolver_job,
         "calibration_recompute": calibration_recompute_job,
         "clv_compute": clv_compute_job,
         # Phase 3 — ML + drift + champion/challenger

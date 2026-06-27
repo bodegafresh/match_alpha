@@ -377,3 +377,171 @@ async def competition_layout(
         },
     }
     return {"ok": True, "data": layout}
+
+
+@router.get("/{slug}/qualification-picture")
+async def qualification_picture(
+    slug: str,
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict[str, Any]:
+    """
+    Returns the current qualification picture for a competition season:
+    - Group standings with qualification_status per team
+    - Best-third ranking (QUALIFIED_BEST_THIRD / THIRD_PLACE_CANDIDATE)
+    - Resolved tournament slots (group winners, runners-up, thirds, knockout progression)
+    """
+    # Resolve season
+    season = await _fetch_one(
+        conn,
+        """
+        SELECT competition_season_id::text, slug, status
+        FROM competition_seasons
+        WHERE slug = :slug OR competition_season_id::text = :slug
+        LIMIT 1
+        """,
+        {"slug": slug},
+    )
+    if not season:
+        raise HTTPException(status_code=404, detail="competition season not found")
+
+    season_id = season["competition_season_id"]
+
+    # Group standings with qualification_status
+    group_standings_rows = await _fetch_all(
+        conn,
+        """
+        SELECT DISTINCT ON (s.group_id, s.team_id)
+            cg.group_code,
+            cg.group_name,
+            t.team_id::text,
+            t.display_name AS team_name,
+            t.country_code,
+            s.position,
+            s.points,
+            s.played,
+            s.wins,
+            s.draws,
+            s.losses,
+            s.goals_for,
+            s.goals_against,
+            s.goal_difference,
+            s.qualification_status
+        FROM standings s
+        JOIN competition_groups cg ON cg.group_id = s.group_id
+        JOIN teams t ON t.team_id = s.team_id
+        WHERE s.competition_season_id = cast(:sid as uuid)
+          AND s.group_id IS NOT NULL
+        ORDER BY s.group_id, s.team_id, s.as_of DESC NULLS LAST
+        """,
+        {"sid": season_id},
+    )
+
+    # Organize by group
+    groups: dict[str, dict] = {}
+    for row in group_standings_rows:
+        gc = row["group_code"]
+        if gc not in groups:
+            groups[gc] = {"group_code": gc, "group_name": row["group_name"], "teams": []}
+        groups[gc]["teams"].append({
+            "team_id": row["team_id"],
+            "team_name": row["team_name"],
+            "country_code": row["country_code"],
+            "position": row["position"],
+            "points": row["points"],
+            "played": row["played"],
+            "wins": row["wins"],
+            "draws": row["draws"],
+            "losses": row["losses"],
+            "goals_for": row["goals_for"],
+            "goals_against": row["goals_against"],
+            "goal_difference": row["goal_difference"],
+            "qualification_status": row["qualification_status"] or "PENDING",
+        })
+    for g in groups.values():
+        g["teams"].sort(key=lambda t: (t["position"] or 99))
+
+    # Best-third ranking
+    third_rows = await _fetch_all(
+        conn,
+        """
+        SELECT DISTINCT ON (s.group_id, s.team_id)
+            t.team_id::text,
+            t.display_name AS team_name,
+            t.country_code,
+            cg.group_code,
+            s.points,
+            s.goal_difference,
+            s.goals_for,
+            s.qualification_status
+        FROM standings s
+        JOIN teams t ON t.team_id = s.team_id
+        JOIN competition_groups cg ON cg.group_id = s.group_id
+        WHERE s.competition_season_id = cast(:sid as uuid)
+          AND s.qualification_status IN ('THIRD_PLACE_CANDIDATE', 'QUALIFIED_BEST_THIRD', 'PENDING_TIEBREAKER')
+          AND s.group_id IS NOT NULL
+        ORDER BY s.group_id, s.team_id, s.as_of DESC NULLS LAST
+        """,
+        {"sid": season_id},
+    )
+    thirds = sorted(
+        [dict(r) for r in third_rows],
+        key=lambda r: (
+            0 if r["qualification_status"] == "QUALIFIED_BEST_THIRD" else 1,
+            -(r["points"] or 0),
+            -(r["goal_difference"] or 0),
+            -(r["goals_for"] or 0),
+        ),
+    )
+
+    # Tournament slots
+    slot_rows = await _fetch_all(
+        conn,
+        """
+        SELECT
+            ts.slot_code,
+            ts.slot_label,
+            ts.slot_type,
+            ts.source_rank,
+            ts.resolved_team_id::text,
+            ts.resolved_at,
+            ts.metadata,
+            t.display_name AS team_name,
+            t.country_code
+        FROM tournament_slots ts
+        LEFT JOIN teams t ON t.team_id = ts.resolved_team_id
+        WHERE ts.competition_season_id = cast(:sid as uuid)
+        ORDER BY ts.slot_code
+        """,
+        {"sid": season_id},
+    )
+
+    slots = [
+        {
+            "slot_code": r["slot_code"],
+            "slot_label": r["slot_label"],
+            "slot_type": r["slot_type"],
+            "resolved": r["resolved_team_id"] is not None,
+            "resolved_team_id": r["resolved_team_id"],
+            "team_name": r["team_name"],
+            "country_code": r["country_code"],
+            "resolved_at": r["resolved_at"].isoformat() if r["resolved_at"] else None,
+        }
+        for r in slot_rows
+    ]
+
+    return {
+        "ok": True,
+        "data": {
+            "competition_season_id": season_id,
+            "slug": slug,
+            "groups": list(groups.values()),
+            "best_thirds": thirds,
+            "tournament_slots": slots,
+            "summary": {
+                "groups_total": len(groups),
+                "slots_total": len(slots),
+                "slots_resolved": sum(1 for s in slots if s["resolved"]),
+                "thirds_qualified": sum(1 for t in thirds if t["qualification_status"] == "QUALIFIED_BEST_THIRD"),
+            },
+        },
+    }

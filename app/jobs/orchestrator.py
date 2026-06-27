@@ -52,6 +52,7 @@ class JobOrchestrator:
         plan = [
             OrchestratedJob("worldcup_daily_refresh", critical=True),
             OrchestratedJob("standings_refresh"),
+            OrchestratedJob("qualification_resolver"),
             OrchestratedJob("odds_refresh", requires_upcoming_matches=True),
             OrchestratedJob("results_settlement", requires_finished_matches=True),
             OrchestratedJob("elo_ratings_update", requires_finished_matches=True),
@@ -75,6 +76,7 @@ class JobOrchestrator:
             OrchestratedJob("worldcup_live_refresh", requires_upcoming_matches=True),
             OrchestratedJob("odds_refresh", requires_upcoming_matches=True),
             OrchestratedJob("results_settlement", requires_finished_matches=True),
+            OrchestratedJob("qualification_resolver"),
         ]
         return await self._run_plan("live", plan, context)
 
