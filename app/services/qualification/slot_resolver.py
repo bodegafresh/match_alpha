@@ -289,8 +289,7 @@ class TournamentSlotResolver:
                     participant_role  = 'TEAM',
                     updated_at        = :now
                 WHERE tournament_slot_id = cast(:slot_id as uuid)
-                  AND participant_role   = 'SLOT'
-                  AND team_id IS NULL
+                  AND (team_id IS NULL OR team_id != cast(:tid as uuid))
             """),
             {
                 "tid": team_id,
