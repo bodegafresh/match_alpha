@@ -30,6 +30,8 @@ class TeamStats:
     position: int = 0
     qualification_status: str = PENDING
     tiebreaker_notes: list[str] = field(default_factory=list)
+    fair_play_score: int = 0      # sum of card penalties; 0 if unknown
+    fifa_ranking: int = 999       # lower = better; 999 = unknown
 
     @property
     def goal_difference(self) -> int:
@@ -49,6 +51,8 @@ class BestThirdEntry:
     goals_for: int
     rank: int = 0
     qualification_status: str = PENDING
+    fair_play_score: int = 0
+    fifa_ranking: int = 999
 
 
 @dataclass

@@ -1,12 +1,13 @@
 """
 BestThirdPlaceResolver: ranks the 12 third-place teams and qualifies the top 8.
 
-FIFA 2026 ranking rules for best thirds:
+FIFA 2026 ranking rules for best thirds (NO H2H):
   1. points
   2. goal_difference
   3. goals_for
-  4. fair_play_points     (not yet stored → PENDING_TIEBREAKER)
-  5. drawing_of_lots      (not resolvable → PENDING_TIEBREAKER)
+  4. fair_play_score (less negative = better; 0 if unknown)
+  5. fifa_ranking (lower = better; 999 if unknown)
+  6. PENDING_TIEBREAKER (drawing of lots — flag all tied teams)
 
 Top 8 thirds → QUALIFIED_BEST_THIRD
 Rest → ELIMINATED
@@ -34,6 +35,8 @@ DEFAULT_THIRD_RULES = [
     "points",
     "goal_difference",
     "goals_for",
+    "fair_play_score",
+    "fifa_ranking",
 ]
 
 
@@ -94,6 +97,8 @@ class BestThirdPlaceResolver:
                     "points": e.points,
                     "goal_difference": e.goal_difference,
                     "goals_for": e.goals_for,
+                    "fair_play_score": e.fair_play_score,
+                    "fifa_ranking": e.fifa_ranking,
                     "qualification_status": e.qualification_status,
                 }
                 for e in ranked
@@ -103,29 +108,44 @@ class BestThirdPlaceResolver:
     # ── ranking ───────────────────────────────────────────────────────────────
 
     def _rank_thirds(self, thirds: list[BestThirdEntry], rules: list[str]) -> list[BestThirdEntry]:
-        """Sort thirds by rules. Flag ties that can't be resolved as PENDING_TIEBREAKER."""
+        """Sort thirds by full FIFA criteria. Flag still-tied teams as PENDING_TIEBREAKER."""
         thirds.sort(
-            key=lambda t: (-t.points, -t.goal_difference, -t.goals_for, t.team_id)
+            key=lambda t: (
+                -t.points,
+                -t.goal_difference,
+                -t.goals_for,
+                -t.fair_play_score,   # less negative = higher = better
+                t.fifa_ranking,       # lower = better
+                t.team_id,            # stable
+            )
         )
 
-        # Detect adjacent ties and flag unresolvable ones
-        for i in range(len(thirds) - 1):
-            a, b = thirds[i], thirds[i + 1]
-            if (
-                a.points == b.points
-                and a.goal_difference == b.goal_difference
-                and a.goals_for == b.goals_for
-            ):
-                # fair_play not stored yet — mark as pending
-                if "fair_play_points" not in rules:
-                    a.qualification_status = PENDING_TIEBREAKER
-                    b.qualification_status = PENDING_TIEBREAKER
+        # Detect still-tied groups and mark PENDING_TIEBREAKER
+        i = 0
+        while i < len(thirds):
+            j = i + 1
+            while j < len(thirds) and self._thirds_all_criteria_equal(thirds[i], thirds[j]):
+                j += 1
+            sub = thirds[i:j]
+            if len(sub) > 1:
+                for t in sub:
+                    t.qualification_status = PENDING_TIEBREAKER
                     log.warning(
-                        "best_third_resolver: unresolvable tie between %s and %s",
-                        a.team_name, b.team_name,
+                        "best_third_resolver: PENDING_TIEBREAKER between %s and others",
+                        t.team_name,
                     )
+            i = j
 
         return thirds
+
+    def _thirds_all_criteria_equal(self, a: BestThirdEntry, b: BestThirdEntry) -> bool:
+        return (
+            a.points == b.points
+            and a.goal_difference == b.goal_difference
+            and a.goals_for == b.goals_for
+            and a.fair_play_score == b.fair_play_score
+            and a.fifa_ranking == b.fifa_ranking
+        )
 
     # ── DB helpers ─────────────────────────────────────────────────────────────
 
@@ -146,36 +166,75 @@ class BestThirdPlaceResolver:
     async def _get_third_place_candidates(
         self, competition_season_id: str
     ) -> list[BestThirdEntry]:
-        result = await self.conn.execute(
-            text("""
-                SELECT DISTINCT ON (s.group_id, s.team_id)
-                    s.team_id::text,
-                    t.display_name AS team_name,
-                    cg.group_code,
-                    s.points,
-                    s.goal_difference,
-                    s.goals_for
-                FROM standings s
-                JOIN teams t  ON t.team_id  = s.team_id
-                JOIN competition_groups cg ON cg.group_id = s.group_id
-                WHERE s.competition_season_id = cast(:sid as uuid)
-                  AND s.qualification_status = 'THIRD_PLACE_CANDIDATE'
-                  AND s.group_id IS NOT NULL
-                ORDER BY s.group_id, s.team_id, s.as_of DESC
-            """),
-            {"sid": competition_season_id},
-        )
-        return [
-            BestThirdEntry(
-                team_id=r.team_id,
-                team_name=r.team_name,
-                group_code=r.group_code,
-                points=r.points or 0,
-                goal_difference=r.goal_difference or 0,
-                goals_for=r.goals_for or 0,
+        try:
+            result = await self.conn.execute(
+                text("""
+                    SELECT DISTINCT ON (s.group_id, s.team_id)
+                        s.team_id::text,
+                        t.display_name AS team_name,
+                        cg.group_code,
+                        s.points,
+                        s.goal_difference,
+                        s.goals_for,
+                        coalesce(s.fair_play_score::int, 0) AS fair_play_score,
+                        coalesce((t.metadata->>'fifa_ranking')::int, 999) AS fifa_ranking
+                    FROM standings s
+                    JOIN teams t  ON t.team_id  = s.team_id
+                    JOIN competition_groups cg ON cg.group_id = s.group_id
+                    WHERE s.competition_season_id = cast(:sid as uuid)
+                      AND s.qualification_status = 'THIRD_PLACE_CANDIDATE'
+                      AND s.group_id IS NOT NULL
+                    ORDER BY s.group_id, s.team_id, s.as_of DESC
+                """),
+                {"sid": competition_season_id},
             )
-            for r in result
-        ]
+            return [
+                BestThirdEntry(
+                    team_id=r.team_id,
+                    team_name=r.team_name,
+                    group_code=r.group_code,
+                    points=r.points or 0,
+                    goal_difference=r.goal_difference or 0,
+                    goals_for=r.goals_for or 0,
+                    fair_play_score=r.fair_play_score or 0,
+                    fifa_ranking=r.fifa_ranking or 999,
+                )
+                for r in result
+            ]
+        except Exception as exc:
+            log.warning(
+                "best_third_resolver: fair_play/ranking columns unavailable (%s), falling back", exc
+            )
+            result = await self.conn.execute(
+                text("""
+                    SELECT DISTINCT ON (s.group_id, s.team_id)
+                        s.team_id::text,
+                        t.display_name AS team_name,
+                        cg.group_code,
+                        s.points,
+                        s.goal_difference,
+                        s.goals_for
+                    FROM standings s
+                    JOIN teams t  ON t.team_id  = s.team_id
+                    JOIN competition_groups cg ON cg.group_id = s.group_id
+                    WHERE s.competition_season_id = cast(:sid as uuid)
+                      AND s.qualification_status = 'THIRD_PLACE_CANDIDATE'
+                      AND s.group_id IS NOT NULL
+                    ORDER BY s.group_id, s.team_id, s.as_of DESC
+                """),
+                {"sid": competition_season_id},
+            )
+            return [
+                BestThirdEntry(
+                    team_id=r.team_id,
+                    team_name=r.team_name,
+                    group_code=r.group_code,
+                    points=r.points or 0,
+                    goal_difference=r.goal_difference or 0,
+                    goals_for=r.goals_for or 0,
+                )
+                for r in result
+            ]
 
     async def _update_standings(
         self, competition_season_id: str, ranked: list[BestThirdEntry]

@@ -1,15 +1,17 @@
 """
 StandingsResolver: recomputes group standings from FINISHED match results.
 
-Ranking rules (read from competition_stages.rules.qualification.group_ranking_rules):
-  1. points
-  2. goal_difference
-  3. goals_for
-  4. head_to_head_points       (subset of tied teams only)
-  5. head_to_head_goal_difference
-  6. head_to_head_goals_for
-  7. fair_play_points           (not yet available → PENDING_TIEBREAKER)
-  8. drawing_of_lots            (not resolvable automatically → PENDING_TIEBREAKER)
+FIFA 2026 ranking rules (applied in order):
+  1.  points
+  2.  H2H points (among tied subset ONLY)
+  3.  H2H goal difference (among tied subset ONLY)
+  4.  H2H goals scored (among tied subset ONLY)
+  5.  If 3+ still tied after H2H: re-apply H2H recursively for still-tied sub-subset
+  6.  Overall goal difference
+  7.  Overall goals scored
+  8.  fair_play_score (less negative = better; 0 if unknown)
+  9.  fifa_ranking (lower = better; 999 if unknown)
+  10. PENDING_TIEBREAKER (drawing of lots — flag all teams)
 
 Results are upserted into the standings table with qualification_status.
 """
@@ -35,11 +37,13 @@ log = logging.getLogger(__name__)
 
 DEFAULT_RANKING_RULES = [
     "points",
-    "goal_difference",
-    "goals_for",
     "head_to_head_points",
     "head_to_head_goal_difference",
     "head_to_head_goals_for",
+    "goal_difference",
+    "goals_for",
+    "fair_play_score",
+    "fifa_ranking",
 ]
 
 
@@ -83,19 +87,29 @@ class StandingsResolver:
             away_score = m["away_score"] or 0
             g = group_meta[gid]
 
-            for tid, tname, gf, ga in [
-                (home_id, m["home_name"], home_score, away_score),
-                (away_id, m["away_name"], away_score, home_score),
+            home_fp = m.get("home_fair_play_score", 0) or 0
+            away_fp = m.get("away_fair_play_score", 0) or 0
+            home_rank = m.get("home_fifa_ranking", 999) or 999
+            away_rank = m.get("away_fifa_ranking", 999) or 999
+
+            for tid, tname, gf, ga, fp, rank in [
+                (home_id, m["home_name"], home_score, away_score, home_fp, home_rank),
+                (away_id, m["away_name"], away_score, home_score, away_fp, away_rank),
             ]:
                 if tid not in group_stats[gid]:
                     group_stats[gid][tid] = TeamStats(
                         team_id=tid, team_name=tname,
                         group_id=gid, group_code=g["group_code"],
+                        fair_play_score=fp,
+                        fifa_ranking=rank,
                     )
                 t = group_stats[gid][tid]
                 t.played += 1
                 t.goals_for += gf
                 t.goals_against += ga
+                # Update fair_play/ranking from latest match data
+                t.fair_play_score = fp
+                t.fifa_ranking = rank
                 if gf > ga:
                     t.wins += 1; t.points += 3
                 elif gf == ga:
@@ -147,83 +161,178 @@ class StandingsResolver:
         match_index: dict[tuple[str, str], dict],
         rules: list[str],
     ) -> list[TeamStats]:
-        """Sort teams applying ranking rules. Groups with ties that can't be
-        resolved by available data are flagged with PENDING_TIEBREAKER."""
-        # Initial sort by overall metrics
-        teams.sort(key=lambda t: (-t.points, -t.goal_difference, -t.goals_for, t.team_id))
+        """Sort teams applying full FIFA ranking rules."""
+        # Initial sort by points (descending), then stable sort key
+        teams.sort(key=lambda t: (-t.points, t.team_id))
 
-        # Detect and break ties for adjacent teams with same points/GD/GF
+        # Find groups of teams tied on points and resolve them
         result: list[TeamStats] = []
         i = 0
         while i < len(teams):
             j = i + 1
-            # Find run of tied teams
-            while j < len(teams) and self._overall_tied(teams[i], teams[j]):
+            while j < len(teams) and teams[i].points == teams[j].points:
                 j += 1
             tied_group = teams[i:j]
 
             if len(tied_group) > 1:
-                tied_group = self._break_tie(tied_group, match_index, rules)
+                tied_group = self._resolve_tied_group(tied_group, match_index)
+            else:
+                # Single team — still need to set overall GD/GF for consistent ordering
+                pass
 
             result.extend(tied_group)
             i = j
 
         return result
 
-    def _overall_tied(self, a: TeamStats, b: TeamStats) -> bool:
-        return a.points == b.points and a.goal_difference == b.goal_difference and a.goals_for == b.goals_for
-
-    def _break_tie(
+    def _resolve_tied_group(
         self,
         tied: list[TeamStats],
         match_index: dict[tuple[str, str], dict],
-        rules: list[str],
     ) -> list[TeamStats]:
-        """Apply H2H rules to a tied subset. Falls back to PENDING_TIEBREAKER."""
-        if "head_to_head_points" not in rules:
-            for t in tied:
-                t.tiebreaker_notes.append("PENDING_TIEBREAKER:no_h2h_rule")
-                t.qualification_status = PENDING_TIEBREAKER
-            return tied
+        """
+        Apply full FIFA tiebreaker to a group tied on points.
+        Steps 2-5: H2H (recursive for sub-ties)
+        Steps 6-7: overall GD, overall GF
+        Steps 8-9: fair play, FIFA ranking
+        Step 10:   PENDING_TIEBREAKER
+        """
+        # Step 1: Apply H2H to the entire tied group
+        after_h2h = self._apply_h2h_recursive(tied, match_index)
 
-        # Compute H2H stats within the tied subset
-        h2h: dict[str, tuple[int, int, int]] = {}  # team_id → (pts, gd, gf)
-        for t in tied:
+        # Flatten and apply overall criteria to remaining tied sub-groups
+        result: list[TeamStats] = []
+        for sub_group in after_h2h:
+            if len(sub_group) == 1:
+                result.extend(sub_group)
+            else:
+                result.extend(self._apply_overall_criteria(sub_group))
+
+        return result
+
+    def _apply_h2h_recursive(
+        self,
+        tied: list[TeamStats],
+        match_index: dict[tuple[str, str], dict],
+    ) -> list[list[TeamStats]]:
+        """
+        Apply H2H among the tied subset. Returns list of sub-groups (each sub-group
+        is still internally tied after H2H). Uses recursion for 3+ way ties.
+        """
+        h2h = self._compute_h2h(tied, match_index)
+
+        # Sort by H2H criteria
+        tied.sort(key=lambda t: (
+            -h2h[t.team_id][0],  # H2H points
+            -h2h[t.team_id][1],  # H2H GD
+            -h2h[t.team_id][2],  # H2H GF
+            t.team_id,
+        ))
+
+        # Group into sub-groups that are still tied on H2H
+        sub_groups: list[list[TeamStats]] = []
+        i = 0
+        while i < len(tied):
+            j = i + 1
+            while j < len(tied) and h2h[tied[i].team_id] == h2h[tied[j].team_id]:
+                j += 1
+            sub_group = tied[i:j]
+            sub_groups.append(sub_group)
+            i = j
+
+        # For sub-groups of 3+ that are still tied, recurse ONLY if the
+        # H2H step actually split the group (i.e., the sub-group is smaller
+        # than the original tied group). If the sub-group is the same size,
+        # we've reached a fixed point — stop recursing.
+        resolved_sub_groups: list[list[TeamStats]] = []
+        for sub in sub_groups:
+            if len(sub) >= 3 and len(sub) < len(tied):
+                # Re-apply H2H only within this subset (FIFA rule 5)
+                inner = self._apply_h2h_recursive(sub, match_index)
+                resolved_sub_groups.extend(inner)
+            else:
+                resolved_sub_groups.append(sub)
+
+        return resolved_sub_groups
+
+    def _compute_h2h(
+        self,
+        subset: list[TeamStats],
+        match_index: dict[tuple[str, str], dict],
+    ) -> dict[str, tuple[int, int, int]]:
+        """Compute H2H stats (pts, gd, gf) for each team in the subset."""
+        h2h: dict[str, tuple[int, int, int]] = {}
+        for t in subset:
             pts = gd = gf = 0
-            for other in tied:
+            for other in subset:
                 if other.team_id == t.team_id:
                     continue
                 m = match_index.get((t.team_id, other.team_id))
                 if m:
-                    gf += m["home_score"] or 0
-                    gd += (m["home_score"] or 0) - (m["away_score"] or 0)
-                    if (m["home_score"] or 0) > (m["away_score"] or 0):
+                    home_score = m["home_score"] or 0
+                    away_score = m["away_score"] or 0
+                    gf += home_score
+                    gd += home_score - away_score
+                    if home_score > away_score:
                         pts += 3
-                    elif (m["home_score"] or 0) == (m["away_score"] or 0):
+                    elif home_score == away_score:
                         pts += 1
                 m2 = match_index.get((other.team_id, t.team_id))
                 if m2:
-                    gf += m2["away_score"] or 0
-                    gd += (m2["away_score"] or 0) - (m2["home_score"] or 0)
-                    if (m2["away_score"] or 0) > (m2["home_score"] or 0):
+                    home_score2 = m2["home_score"] or 0
+                    away_score2 = m2["away_score"] or 0
+                    gf += away_score2
+                    gd += away_score2 - home_score2
+                    if away_score2 > home_score2:
                         pts += 3
-                    elif (m2["home_score"] or 0) == (m2["away_score"] or 0):
+                    elif away_score2 == home_score2:
                         pts += 1
             h2h[t.team_id] = (pts, gd, gf)
+        return h2h
 
-        try:
-            tied.sort(key=lambda t: (-h2h[t.team_id][0], -h2h[t.team_id][1], -h2h[t.team_id][2], t.team_id))
-        except KeyError:
-            pass
+    def _apply_overall_criteria(self, tied: list[TeamStats]) -> list[TeamStats]:
+        """
+        Apply steps 6-10: overall GD, overall GF, fair_play, fifa_ranking,
+        then PENDING_TIEBREAKER.
+        """
+        # Sort by overall GD, then GF, then fair_play (higher = better = less negative),
+        # then FIFA ranking (lower = better)
+        tied.sort(key=lambda t: (
+            -t.goal_difference,
+            -t.goals_for,
+            -t.fair_play_score,   # less negative = higher = better
+            t.fifa_ranking,       # lower = better
+            t.team_id,            # stable sort
+        ))
 
-        # Check if still tied after H2H — mark as PENDING_TIEBREAKER
-        for i in range(len(tied) - 1):
-            a, b = tied[i], tied[i + 1]
-            if h2h.get(a.team_id) == h2h.get(b.team_id):
-                a.tiebreaker_notes.append("PENDING_TIEBREAKER:h2h_equal")
-                b.tiebreaker_notes.append("PENDING_TIEBREAKER:h2h_equal")
+        # Find still-tied groups and mark PENDING_TIEBREAKER
+        result: list[TeamStats] = []
+        i = 0
+        while i < len(tied):
+            j = i + 1
+            while j < len(tied) and self._overall_criteria_equal(tied[i], tied[j]):
+                j += 1
+            sub = tied[i:j]
+            if len(sub) > 1:
+                for t in sub:
+                    t.tiebreaker_notes.append("PENDING_TIEBREAKER:drawing_of_lots")
+                    t.qualification_status = PENDING_TIEBREAKER
+                    log.warning(
+                        "standings_resolver: PENDING_TIEBREAKER for %s in group %s",
+                        t.team_name, t.group_code,
+                    )
+            result.extend(sub)
+            i = j
 
-        return tied
+        return result
+
+    def _overall_criteria_equal(self, a: TeamStats, b: TeamStats) -> bool:
+        return (
+            a.goal_difference == b.goal_difference
+            and a.goals_for == b.goals_for
+            and a.fair_play_score == b.fair_play_score
+            and a.fifa_ranking == b.fifa_ranking
+        )
 
     # ── DB helpers ─────────────────────────────────────────────────────────────
 
@@ -255,49 +364,120 @@ class StandingsResolver:
         return [dict(r._mapping) for r in result]
 
     async def _get_finished_group_matches(self, competition_season_id: str) -> list[dict]:
-        """Get FINISHED matches in GROUP_STAGE, joined to their group via standings."""
-        result = await self.conn.execute(
-            text("""
-                SELECT DISTINCT ON (m.match_id)
-                    m.match_id::text,
-                    m.home_score,
-                    m.away_score,
-                    sh.group_id::text,
-                    cg.group_code,
-                    home_p.team_id::text  AS home_team_id,
-                    ht.display_name       AS home_name,
-                    away_p.team_id::text  AS away_team_id,
-                    at_.display_name      AS away_name
-                FROM matches m
-                JOIN competition_stages cs
-                  ON cs.stage_id = m.stage_id AND cs.stage_type = 'GROUP_STAGE'
-                JOIN match_participants home_p
-                  ON home_p.match_id = m.match_id
-                 AND home_p.side = 'HOME'
-                 AND home_p.participant_role = 'TEAM'
-                JOIN match_participants away_p
-                  ON away_p.match_id = m.match_id
-                 AND away_p.side = 'AWAY'
-                 AND away_p.participant_role = 'TEAM'
-                JOIN teams ht  ON ht.team_id  = home_p.team_id
-                JOIN teams at_ ON at_.team_id = away_p.team_id
-                -- Link match to group via the home team's standing
-                JOIN standings sh
-                  ON sh.team_id = home_p.team_id
-                 AND sh.competition_season_id = m.competition_season_id
-                 AND sh.group_id IS NOT NULL
-                JOIN competition_groups cg ON cg.group_id = sh.group_id
-                -- Verify away team is in the same group
-                JOIN standings sa
-                  ON sa.team_id = away_p.team_id
-                 AND sa.group_id = sh.group_id
-                WHERE m.competition_season_id = cast(:sid as uuid)
-                  AND m.status = 'FINISHED'
-                ORDER BY m.match_id, sh.as_of DESC
-            """),
-            {"sid": competition_season_id},
-        )
-        return [dict(r._mapping) for r in result]
+        """Get FINISHED matches in GROUP_STAGE, joined to their group via standings.
+        Tries to include fair_play_score and fifa_ranking; degrades gracefully if unavailable."""
+        try:
+            result = await self.conn.execute(
+                text("""
+                    SELECT DISTINCT ON (m.match_id)
+                        m.match_id::text,
+                        m.home_score,
+                        m.away_score,
+                        sh.group_id::text,
+                        cg.group_code,
+                        home_p.team_id::text  AS home_team_id,
+                        ht.display_name       AS home_name,
+                        away_p.team_id::text  AS away_team_id,
+                        at_.display_name      AS away_name,
+                        coalesce((s_home.fair_play_score)::int, 0) AS home_fair_play_score,
+                        coalesce((s_away.fair_play_score)::int, 0) AS away_fair_play_score,
+                        coalesce((ht.metadata->>'fifa_ranking')::int, 999) AS home_fifa_ranking,
+                        coalesce((at_.metadata->>'fifa_ranking')::int, 999) AS away_fifa_ranking
+                    FROM matches m
+                    JOIN competition_stages cs
+                      ON cs.stage_id = m.stage_id AND cs.stage_type = 'GROUP_STAGE'
+                    JOIN match_participants home_p
+                      ON home_p.match_id = m.match_id
+                     AND home_p.side = 'HOME'
+                     AND home_p.participant_role = 'TEAM'
+                    JOIN match_participants away_p
+                      ON away_p.match_id = m.match_id
+                     AND away_p.side = 'AWAY'
+                     AND away_p.participant_role = 'TEAM'
+                    JOIN teams ht  ON ht.team_id  = home_p.team_id
+                    JOIN teams at_ ON at_.team_id = away_p.team_id
+                    -- Link match to group via the home team's standing
+                    JOIN standings sh
+                      ON sh.team_id = home_p.team_id
+                     AND sh.competition_season_id = m.competition_season_id
+                     AND sh.group_id IS NOT NULL
+                    JOIN competition_groups cg ON cg.group_id = sh.group_id
+                    -- Verify away team is in the same group
+                    JOIN standings sa
+                      ON sa.team_id = away_p.team_id
+                     AND sa.group_id = sh.group_id
+                    -- Latest standings for fair_play_score (home/away)
+                    LEFT JOIN LATERAL (
+                        SELECT fair_play_score
+                        FROM standings
+                        WHERE team_id = home_p.team_id
+                          AND competition_season_id = m.competition_season_id
+                          AND group_id IS NOT NULL
+                        ORDER BY as_of DESC
+                        LIMIT 1
+                    ) s_home ON true
+                    LEFT JOIN LATERAL (
+                        SELECT fair_play_score
+                        FROM standings
+                        WHERE team_id = away_p.team_id
+                          AND competition_season_id = m.competition_season_id
+                          AND group_id IS NOT NULL
+                        ORDER BY as_of DESC
+                        LIMIT 1
+                    ) s_away ON true
+                    WHERE m.competition_season_id = cast(:sid as uuid)
+                      AND m.status = 'FINISHED'
+                    ORDER BY m.match_id, sh.as_of DESC
+                """),
+                {"sid": competition_season_id},
+            )
+            return [dict(r._mapping) for r in result]
+        except Exception as exc:
+            log.warning(
+                "standings_resolver: fair_play/ranking columns unavailable (%s), falling back", exc
+            )
+            result = await self.conn.execute(
+                text("""
+                    SELECT DISTINCT ON (m.match_id)
+                        m.match_id::text,
+                        m.home_score,
+                        m.away_score,
+                        sh.group_id::text,
+                        cg.group_code,
+                        home_p.team_id::text  AS home_team_id,
+                        ht.display_name       AS home_name,
+                        away_p.team_id::text  AS away_team_id,
+                        at_.display_name      AS away_name
+                    FROM matches m
+                    JOIN competition_stages cs
+                      ON cs.stage_id = m.stage_id AND cs.stage_type = 'GROUP_STAGE'
+                    JOIN match_participants home_p
+                      ON home_p.match_id = m.match_id
+                     AND home_p.side = 'HOME'
+                     AND home_p.participant_role = 'TEAM'
+                    JOIN match_participants away_p
+                      ON away_p.match_id = m.match_id
+                     AND away_p.side = 'AWAY'
+                     AND away_p.participant_role = 'TEAM'
+                    JOIN teams ht  ON ht.team_id  = home_p.team_id
+                    JOIN teams at_ ON at_.team_id = away_p.team_id
+                    -- Link match to group via the home team's standing
+                    JOIN standings sh
+                      ON sh.team_id = home_p.team_id
+                     AND sh.competition_season_id = m.competition_season_id
+                     AND sh.group_id IS NOT NULL
+                    JOIN competition_groups cg ON cg.group_id = sh.group_id
+                    -- Verify away team is in the same group
+                    JOIN standings sa
+                      ON sa.team_id = away_p.team_id
+                     AND sa.group_id = sh.group_id
+                    WHERE m.competition_season_id = cast(:sid as uuid)
+                      AND m.status = 'FINISHED'
+                    ORDER BY m.match_id, sh.as_of DESC
+                """),
+                {"sid": competition_season_id},
+            )
+            return [dict(r._mapping) for r in result]
 
     async def _upsert_standings(
         self,

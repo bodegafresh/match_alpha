@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.time import utc_now
+from app.services.qualification.assignment_matrix import FIFAAssignmentMatrix
 from app.services.qualification.models import SlotResolution
 
 log = logging.getLogger(__name__)
@@ -52,13 +53,24 @@ class TournamentSlotResolver:
         best_thirds = await self._get_ranked_best_thirds(competition_season_id)
         knockout_results = await self._get_knockout_results(competition_season_id)
 
+        # Build assignment matrix mapping for best-third slots
+        qualifying_groups = [
+            t["group_code"].replace("Grupo ", "").strip()
+            for t in best_thirds
+            if t["qualification_status"] == "QUALIFIED_BEST_THIRD"
+        ]
+        matrix_mapping: dict[str, str] = {}
+        if len(qualifying_groups) == 8:
+            matrix = FIFAAssignmentMatrix(self.conn)
+            matrix_mapping = await matrix.resolve(competition_season_id, qualifying_groups)
+
         resolutions: list[SlotResolution] = []
         resolved_count = 0
         pending_count = 0
 
         for slot in slots:
             resolution = self._resolve_slot(
-                slot, group_standings, best_thirds, knockout_results
+                slot, group_standings, best_thirds, knockout_results, matrix_mapping
             )
             resolutions.append(resolution)
 
@@ -92,6 +104,7 @@ class TournamentSlotResolver:
         group_standings: dict[str, list[dict]],
         best_thirds: list[dict],
         knockout_results: dict[str, dict],
+        matrix_mapping: dict[str, str] | None = None,
     ) -> SlotResolution:
         slot_id = slot["tournament_slot_id"]
         slot_code = slot["slot_code"]
@@ -129,14 +142,38 @@ class TournamentSlotResolver:
 
         # ── Best third place slots
         if source_group_id and source_rank == 3:
-            allowed_groups = slot.get("metadata", {}).get("allowed_groups", [])
-            team = self._find_best_third(best_thirds, allowed_groups)
-            if team is None and not best_thirds:
+            if not best_thirds:
                 return SlotResolution(
                     slot_id=slot_id, slot_code=slot_code, slot_label=slot_label,
                     resolved_team_id=None, status=SLOT_STATUS_PENDING,
                     reason="no_thirds_qualified_yet", source="best_thirds",
                 )
+
+            # Try matrix mapping first
+            if matrix_mapping and slot_code in matrix_mapping:
+                group_letter = matrix_mapping[slot_code]
+                team = next(
+                    (
+                        t for t in best_thirds
+                        if t["qualification_status"] == "QUALIFIED_BEST_THIRD"
+                        and t["group_code"].replace("Grupo ", "").strip().upper() == group_letter.upper()
+                        and not t.get("slot_assigned")
+                    ),
+                    None,
+                )
+                if team:
+                    team["slot_assigned"] = True
+                    return SlotResolution(
+                        slot_id=slot_id, slot_code=slot_code, slot_label=slot_label,
+                        resolved_team_id=team["team_id"],
+                        status=SLOT_STATUS_RESOLVED,
+                        reason=f"BEST_THIRD_MATRIX_GROUP_{group_letter}",
+                        source="best_thirds",
+                    )
+
+            # Fall back to allowed_groups metadata
+            allowed_groups = slot.get("metadata", {}).get("allowed_groups", [])
+            team = self._find_best_third(best_thirds, allowed_groups)
             if team is None:
                 return SlotResolution(
                     slot_id=slot_id, slot_code=slot_code, slot_label=slot_label,
