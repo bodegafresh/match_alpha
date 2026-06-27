@@ -613,7 +613,10 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
                           :played, :wins, :draws, :losses,
                           :gf, :ga, :gd, :points, :as_of
                         )
-                        ON CONFLICT (competition_season_id, team_id, as_of)
+                        ON CONFLICT (competition_season_id,
+                          coalesce(stage_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                          coalesce(group_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                          team_id, as_of)
                         DO UPDATE SET
                           position = excluded.position,
                           played = excluded.played, wins = excluded.wins,

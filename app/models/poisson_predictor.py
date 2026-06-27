@@ -9,7 +9,15 @@ Stores predictions with fixed-contract explanation JSON.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any
+
+
+class _DecimalEncoder(json.JSONEncoder):
+    def default(self, o: Any) -> Any:
+        if isinstance(o, Decimal):
+            return float(o)
+        return super().default(o)
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -163,7 +171,7 @@ async def _upsert_prediction(
             "selection_id": selection_id,
             "raw_probability": round(raw_probability, 6),
             "fair_odds": round(fair_odds, 4),
-            "explanation": json.dumps(explanation),
+            "explanation": json.dumps(explanation, cls=_DecimalEncoder),
             "payload": json.dumps({}),
             "as_of": as_of,
         },
@@ -227,7 +235,7 @@ async def run_poisson_prediction(
         "model_family": _MODEL_FAMILY,
         "model_version": _MODEL_VERSION,
         "feature_set_version": home_fs.get("feature_set_version", "v1"),
-        "feature_completeness": home_fs.get("feature_completeness"),
+        "feature_completeness": float(home_fs.get("feature_completeness") or 0),
         "lambda_components": {
             "base_goals": round(comp_avg, 4),
             "home_attack_strength": round(home_atk, 4),
