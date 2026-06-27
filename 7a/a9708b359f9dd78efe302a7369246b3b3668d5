@@ -1,0 +1,37 @@
+supabase/migrations/019_qualification_status.sql
+  s_acedc47d393e24::t_f3d4881532bd9e 1-25
+app/jobs/orchestrator.py
+  s_acedc47d393e24::t_a061ec7fa1dfc2 79
+  s_acedc47d393e24::t_59f102fca09c89 55
+app/api/routes/competitions.py
+  s_acedc47d393e24::t_631979355d89c4 380-547
+app/jobs/registry.py
+  s_acedc47d393e24::t_05ea54ba7d38f5 892
+  s_acedc47d393e24::t_a2272a31397b03 846-873
+app/services/qualification/models.py
+  s_acedc47d393e24::t_b552ba5b464541 1-87
+app/services/qualification/best_third_resolver.py
+  s_acedc47d393e24::t_e60cb7ee0db5bb 1-196
+app/services/qualification/standings_resolver.py
+  s_acedc47d393e24::t_10753dccd61abf 1-348
+app/services/qualification/slot_resolver.py
+  s_acedc47d393e24::t_c41139c851689b 1-385
+app/services/qualification/orchestrator.py
+  s_acedc47d393e24::t_5d56564f14f183 1-202
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "7aa9708b359f9dd78efe302a7369246b3b3668d5",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
