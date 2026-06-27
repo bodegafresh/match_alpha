@@ -2800,25 +2800,61 @@ def _bootstrap_load_context(sb: Supabase) -> dict[str, Any]:
     return {"markets": markets, "sel_by_code": sel_by_code, "competition_season_id": competition_season_id}
 
 
+def _raw_norm(name: Any) -> str:
+    """Raw name normalization without alias lookup — used for multi-key match index."""
+    text = str(name or "")
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = text.lower()
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
 def _bootstrap_build_match_lookup(sb: Supabase) -> dict[tuple[str, str], str]:
-    """Build {(kickoff_date, home_team_key): match_id} from DB."""
-    # Fetch matches with participants
+    """
+    Build a multi-key match lookup from DB.
+    Indexes each match under multiple (date, team_key) combinations to handle:
+    - Spanish vs English team names
+    - UTC vs local-date offsets (±1 day)
+    Returns {(kickoff_date, norm_key): match_id}.
+    """
+    from datetime import timedelta as _td
+
     raw_matches = sb.select("matches", {"select": "match_id,kickoff_at"})
     raw_participants = sb.select("match_participants", {"select": "match_id,side,team_id"})
     raw_teams = sb.select("teams", {"select": "team_id,slug,display_name"})
 
-    team_key_by_id = {t["team_id"]: team_key(t["display_name"] or t["slug"] or "") for t in raw_teams}
-    home_by_match: dict[str, str] = {}
+    # Build team name variants: canonical key + raw norm
+    team_variants_by_id: dict[str, list[str]] = {}
+    for t in raw_teams:
+        name = t.get("display_name") or t.get("slug") or ""
+        slug = t.get("slug") or ""
+        variants = {team_key(name), _raw_norm(name), _raw_norm(slug)}
+        variants.discard("")
+        team_variants_by_id[t["team_id"]] = list(variants)
+
+    home_variants_by_match: dict[str, list[str]] = {}
     for p in raw_participants:
         if p.get("side") == "HOME":
-            home_by_match[p["match_id"]] = team_key_by_id.get(p["team_id"], "")
+            tid = p["team_id"]
+            home_variants_by_match[p["match_id"]] = team_variants_by_id.get(tid, [])
 
     lookup: dict[tuple[str, str], str] = {}
     for m in raw_matches:
-        kickoff = (m.get("kickoff_at") or "")[:10]
-        home = home_by_match.get(m["match_id"], "")
-        if kickoff and home:
-            lookup[(kickoff, home)] = m["match_id"]
+        mid = m["match_id"]
+        kickoff_str = (m.get("kickoff_at") or "")[:10]
+        if not kickoff_str:
+            continue
+        try:
+            kickoff_date = date.fromisoformat(kickoff_str)
+        except ValueError:
+            continue
+        variants = home_variants_by_match.get(mid, [])
+        # Index under kickoff date AND ±1 day to absorb Chile↔UTC offset
+        for delta in (0, -1, 1):
+            d_str = (kickoff_date + _td(days=delta)).isoformat()
+            for v in variants:
+                if v:
+                    lookup.setdefault((d_str, v), mid)
     return lookup
 
 
@@ -2828,7 +2864,7 @@ def _bootstrap_resolve_match(
     visitante: Any,
     fecha: Any,
 ) -> str | None:
-    """Resolve (local, visitante, fecha) to match_id. Tries both home/away orders."""
+    """Resolve (local, visitante, fecha) to match_id using multi-key lookup."""
     date_str = ""
     if isinstance(fecha, (datetime, date)):
         date_str = str(fecha)[:10]
@@ -2836,9 +2872,16 @@ def _bootstrap_resolve_match(
         date_str = str(fecha)[:10]
     if not date_str:
         return None
-    home_k = team_key(local)
-    away_k = team_key(visitante)
-    return lookup.get((date_str, home_k)) or lookup.get((date_str, away_k))
+
+    # Try multiple normalizations for each team name
+    for name in (local, visitante):
+        for norm_fn in (team_key, _raw_norm):
+            k = norm_fn(name)
+            if k:
+                mid = lookup.get((date_str, k))
+                if mid:
+                    return mid
+    return None
 
 
 def _bootstrap_ensure_model_run(sb: Supabase, ctx: dict[str, Any]) -> str:
@@ -2961,7 +3004,7 @@ def bootstrap_model_predictions_from_poisson(
 
     print(f"  bootstrap_model_predictions: {len(batch)} rows (skipped {skipped} unmatched matches)")
     for chunk in chunks(batch, 100):
-        sb.upsert("model_predictions", chunk, "model_run_id,match_id,market_id,selection_id", returning=False)
+        sb.insert_ignore("model_predictions", chunk)
     return len(batch)
 
 
@@ -3036,7 +3079,6 @@ def bootstrap_odds_snapshots_from_ev(
             "market_id": market_id,
             "selection_id": selection_id,
             "decimal_odds": cuota,
-            "implied_probability": round(1.0 / cuota, 6),
             "captured_at": captured_at,
             "payload": {**LEGACY_BACKFILL_PAYLOAD, "imported_at": now},
         })

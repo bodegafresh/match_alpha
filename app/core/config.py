@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     the_odds_api_key: str | None = Field(default=None, alias="THE_ODDS_API_KEY")
     weather_api_key: str | None = Field(default=None, alias="WEATHER_API_KEY")
     news_api_key: str | None = Field(default=None, alias="NEWS_API_KEY")
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL")
 
     job_max_retries: int = Field(default=3, alias="JOB_MAX_RETRIES")
     http_timeout_seconds: int = Field(default=30, alias="HTTP_TIMEOUT_SECONDS")

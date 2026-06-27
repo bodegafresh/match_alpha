@@ -1,5 +1,8 @@
 import json
+import logging
 from typing import Any, Awaitable, Callable
+
+log = logging.getLogger(__name__)
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -25,6 +28,7 @@ from app.calibration.evaluator import run_calibration
 from app.feedback.clv_calculator import compute_pending_clv
 from app.feedback.settlement_service import settle_pending_decisions
 from app.models.poisson_predictor import _get_or_create_model_registry, run_poisson_prediction
+from app.models.ai_adjuster import adjust_predictions_with_ai
 from app.models.drift_detector import detect_drift
 from app.models.lgbm.retraining_pipeline import run_retraining
 
@@ -205,6 +209,7 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
     match_rows = [dict(r._mapping) for r in matches]
 
     predicted = 0
+    ai_adjusted = 0
     errors = 0
     for m in match_rows:
         result = await run_poisson_prediction(
@@ -217,26 +222,45 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
         )
         if "error" in result:
             errors += 1
-        else:
-            predicted += 1
+            continue
+
+        predicted += 1
+
+        # AI adjustment: enrich Poisson baseline with OpenAI context
+        raw_probs = result.get("probabilities", {})
+        if raw_probs and all(k in raw_probs for k in ("HOME", "DRAW", "AWAY")):
+            try:
+                ai_result = await adjust_predictions_with_ai(
+                    conn,
+                    match_id=m["match_id"],
+                    model_run_id=model_run_id,
+                    raw_probs=raw_probs,
+                )
+                if ai_result.get("status") == "ok":
+                    ai_adjusted += 1
+            except Exception as ai_exc:
+                log.warning("AI adjustment failed for match %s: %s", m["match_id"], ai_exc)
 
     # Update model run status
+    db_run_status = "SUCCEEDED" if errors == 0 else "FAILED"
+    api_status = "OK" if errors == 0 else "WARN"
     await conn.execute(
         text("""
             UPDATE model_runs SET run_status = :status, training_window_end_at = :now
             WHERE model_run_id = cast(:run_id as uuid)
         """),
         {
-            "status": "OK" if errors == 0 else "WARN",
+            "status": db_run_status,
             "now": utc_now(),
             "run_id": model_run_id,
         },
     )
 
     return {
-        "status": "OK" if errors == 0 else "WARN",
+        "status": api_status,
         "job_name": "model_recompute",
         "records_processed": predicted,
+        "ai_adjusted": ai_adjusted,
         "model_run_id": model_run_id,
         "errors": errors,
     }
