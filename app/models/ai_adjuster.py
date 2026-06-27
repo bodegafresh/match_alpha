@@ -9,7 +9,7 @@ Mirrors the world_cup_2026 AiAnalysis.gs approach:
 
 Sources used (best-effort, graceful degradation):
   - Odds snapshot (best available from odds_snapshots)
-  - Group standings (competition_standings table)
+  - Group standings (standings table)
   - Team form (from feature_snapshots: form_points, form_gd, rest_days)
   - ELO ratings (from feature_snapshots)
   - Weather (WeatherAPI if key configured)
@@ -96,20 +96,21 @@ async def _fetch_standings(conn: AsyncConnection, match_id: str) -> list[dict]:
         text("""
             SELECT
               t.display_name AS team,
-              cs2.position,
-              cs2.played,
-              cs2.won,
-              cs2.drawn,
-              cs2.lost,
-              cs2.goals_for,
-              cs2.goals_against,
-              cs2.points
-            FROM competition_standings cs2
-            JOIN teams t ON t.team_id = cs2.team_id
-            WHERE cs2.competition_season_id = (
+              s.position,
+              s.played,
+              s.won,
+              s.drawn,
+              s.lost,
+              s.goals_for,
+              s.goals_against,
+              s.points
+            FROM standings s
+            JOIN teams t ON t.team_id = s.team_id
+            WHERE s.competition_season_id = (
               SELECT competition_season_id FROM matches WHERE match_id = cast(:mid as uuid)
             )
-            ORDER BY cs2.group_code, cs2.position
+              AND s.group_id IS NOT NULL
+            ORDER BY s.group_id, s.position
             LIMIT 32
         """),
         {"mid": match_id},
