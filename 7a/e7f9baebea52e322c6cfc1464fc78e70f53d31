@@ -1,0 +1,31 @@
+app/models/lgbm/retraining_pipeline.py
+  s_acedc47d393e24::t_f63413037eb2ba 1-181
+app/models/drift_detector.py
+  s_acedc47d393e24::t_10501bb5c5131d 1-174
+app/jobs/registry.py
+  s_acedc47d393e24::t_bef9f2174d16af 659-662
+  s_acedc47d393e24::t_1b58ccbc18896f 529-623
+  s_acedc47d393e24::t_984af36231cab8 28-29
+app/jobs/orchestrator.py
+  s_acedc47d393e24::t_00588746715d11 63,65-68
+app/models/lgbm/predictor.py
+  s_acedc47d393e24::t_e6f61026be9c6d 1-184
+app/models/lgbm/trainer.py
+  s_acedc47d393e24::t_fda03ff209f1d0 1-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "7ae7f9baebea52e322c6cfc1464fc78e70f53d31",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
