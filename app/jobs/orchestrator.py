@@ -58,10 +58,9 @@ class JobOrchestrator:
             OrchestratedJob("feature_snapshot_build", requires_upcoming_matches=True),
             OrchestratedJob("model_recompute", requires_upcoming_matches=True),
             OrchestratedJob("ev_decision", requires_predictions=True, requires_odds=True),
+            OrchestratedJob("calibration_recompute", requires_finished_matches=True),
+            OrchestratedJob("clv_compute", requires_finished_matches=True),
             OrchestratedJob("pipeline_cleanup"),
-            # Phase 2 (uncomment when calibration pipeline is ready):
-            # OrchestratedJob("calibration_recompute", requires_finished_matches=True),
-            # OrchestratedJob("clv_compute", requires_finished_matches=True),
         ]
         return await self._run_plan("daily", plan, context)
 

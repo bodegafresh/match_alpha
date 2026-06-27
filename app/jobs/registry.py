@@ -21,6 +21,8 @@ from app.features.snapshot_builder import (
     build_match_feature_snapshots,
     get_matches_needing_snapshots,
 )
+from app.calibration.evaluator import run_calibration
+from app.feedback.clv_calculator import compute_pending_clv
 from app.feedback.settlement_service import settle_pending_decisions
 from app.models.poisson_predictor import _get_or_create_model_registry, run_poisson_prediction
 
@@ -479,6 +481,49 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
     return {"status": "OK", "job_name": "standings_refresh", "records_processed": inserted}
 
 
+async def calibration_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Fit calibration model on settled predictions and update calibrated_probability."""
+    settings = get_settings()
+
+    row = await conn.execute(
+        text("SELECT competition_season_id::text FROM competition_seasons WHERE slug = :slug LIMIT 1"),
+        {"slug": settings.default_season_slug},
+    )
+    r = row.fetchone()
+    if not r:
+        return {"status": "WARN", "job_name": "calibration_recompute", "records_processed": 0, "message": "season not found"}
+    season_id = r[0]
+
+    model_row = await conn.execute(
+        text("SELECT model_id::text FROM model_registry WHERE champion_status = 'CHAMPION' ORDER BY created_at DESC LIMIT 1")
+    )
+    mr = model_row.fetchone()
+    if not mr:
+        return {"status": "WARN", "job_name": "calibration_recompute", "records_processed": 0, "message": "no champion model"}
+    model_id = mr[0]
+
+    method = payload.get("method", "ISOTONIC")
+    result = await run_calibration(conn, model_id=model_id, competition_season_id=season_id, method=method)
+    return {
+        "status": result.get("status", "OK"),
+        "job_name": "calibration_recompute",
+        "records_processed": result.get("n", 0),
+        **result,
+    }
+
+
+async def clv_compute_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Compute CLV for settled decisions that don't have it yet."""
+    _ = payload
+    result = await compute_pending_clv(conn)
+    return {
+        "status": result["status"],
+        "job_name": "clv_compute",
+        "records_processed": result["computed"],
+        **result,
+    }
+
+
 async def pipeline_cleanup_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
     """Deletes pipeline_runs older than 30 days to keep the table lean."""
     _ = payload
@@ -512,11 +557,12 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "model_recompute": model_recompute_job,
         "odds_refresh": odds_refresh_job,
         "standings_refresh": standings_refresh_job,
+        "calibration_recompute": calibration_recompute_job,
+        "clv_compute": clv_compute_job,
     }
     scaffold_jobs = {
         "dataset_builder",
         "settlement",
-        "calibration_recompute",
         "backtest_walk_forward",
         "model_promotion",
     }
