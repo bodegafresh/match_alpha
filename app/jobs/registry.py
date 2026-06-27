@@ -325,14 +325,27 @@ async def odds_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) -> di
     unmatched = 0
     captured_at = utc_now()
 
-    try:
-        data = await client.odds(
-            sport="soccer_fifa_world_cup",
-            regions="us,uk,eu",
-            markets="h2h,totals",
-        )
-    except Exception as exc:
-        return {"status": "WARN", "job_name": "odds_refresh", "records_processed": 0, "error": str(exc)}
+    # The Odds API changes sport key once the tournament is live.
+    # Try both slugs; use whichever returns events.
+    _SPORT_KEYS = ["soccer_fifa_world_cup", "soccer_fifa_world_cup_2026"]
+    data: list[dict] = []
+    sport_key_used = None
+    for _sport_key in _SPORT_KEYS:
+        try:
+            _result = await client.odds(sport=_sport_key, regions="us,uk,eu", markets="h2h,totals")
+            if _result:
+                data = _result
+                sport_key_used = _sport_key
+                break
+            log.info("odds_refresh: sport_key=%s returned 0 events, trying next", _sport_key)
+        except Exception as exc:
+            log.warning("odds_refresh: sport_key=%s error: %s", _sport_key, exc)
+    if not data:
+        return {
+            "status": "WARN", "job_name": "odds_refresh", "records_processed": 0,
+            "message": f"0 events from all sport keys: {_SPORT_KEYS}",
+        }
+    log.info("odds_refresh: sport_key=%s → %d events", sport_key_used, len(data))
 
     for event in (data or []):
         # Smart fetch policy: skip if no useful kickoff data
