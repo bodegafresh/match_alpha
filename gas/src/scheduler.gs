@@ -95,6 +95,10 @@ function runDailyBackendOrchestration() {
 
   var result = backendFetch_('/api/v1/jobs/orchestrate/daily', { method: 'post', payload: { source: 'gas_daily' } });
 
+  // Fetchear noticias desde Google News RSS y pushear al backend
+  // (GAS puede acceder a Google News; Render está bloqueado)
+  try { runNewsSync(); } catch (e) { Logger.log('runNewsSync error: ' + e.message); }
+
   // Marcar como ejecutado solo si el backend respondió sin error 5xx
   if (result.ok || (result.status_code && result.status_code < 500)) {
     props.setProperty(MATCH_ALPHA_CRON_PROPS.DAILY_RAN_DATE, today);
