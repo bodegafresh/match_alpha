@@ -601,91 +601,92 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
         except Exception:
             continue
 
-        # FD standings response: each group_standing has a "group" field
-        # (e.g. "GROUP_A") that maps to competition_groups.group_code in our DB.
-        fd_group_code = group_standing.get("group") or ""
+        # FD standings response: list of group blocks, each with a "group" field
+        # (e.g. "GROUP_A") and a "table" list of team rows.
+        for group_standing in (data.get("standings") or []):
+            fd_group_code = group_standing.get("group") or ""
 
-        # Resolve our group_id once per FD group block (not per team row)
-        group_id: str | None = None
-        if fd_group_code:
-            g_row = await conn.execute(
-                text("""
-                    SELECT cg.group_id::text FROM competition_groups cg
-                    JOIN competition_seasons cs ON cs.competition_season_id = cg.competition_season_id
-                    WHERE cs.competition_season_id = cast(:season_id as uuid)
-                      AND upper(cg.group_code) = upper(:group_code)
-                    LIMIT 1
-                """),
-                {"season_id": season["competition_season_id"], "group_code": fd_group_code},
-            )
-            g = g_row.fetchone()
-            if g:
-                group_id = g[0]
+            # Resolve our group_id once per FD group block (not per team row)
+            group_id: str | None = None
+            if fd_group_code:
+                g_row = await conn.execute(
+                    text("""
+                        SELECT cg.group_id::text FROM competition_groups cg
+                        JOIN competition_seasons cs ON cs.competition_season_id = cg.competition_season_id
+                        WHERE cs.competition_season_id = cast(:season_id as uuid)
+                          AND upper(cg.group_code) = upper(:group_code)
+                        LIMIT 1
+                    """),
+                    {"season_id": season["competition_season_id"], "group_code": fd_group_code},
+                )
+                g = g_row.fetchone()
+                if g:
+                    group_id = g[0]
 
-        if not group_id:
-            # Cannot resolve group — skip entire block to avoid null-group rows
-            continue
-
-        for entry in (group_standing.get("table") or []):
-            source_team_id = str(entry["team"]["id"])
-            team_ref = await conn.execute(
-                text("""
-                    SELECT entity_id::text FROM entity_external_refs
-                    WHERE source = 'FOOTBALL_DATA' AND source_entity_id = :tid AND entity_type = 'TEAM'
-                    LIMIT 1
-                """),
-                {"tid": source_team_id},
-            )
-            tr = team_ref.fetchone()
-            if not tr:
+            if not group_id:
+                # Cannot resolve group — skip entire block to avoid null-group rows
                 continue
-            team_id = tr[0]
 
-            # The unique index includes as_of, so ON CONFLICT never fires when
-            # as_of changes between runs — it would always INSERT a new row.
-            # Fix: DELETE the existing row for this (season, group, team) first,
-            # then INSERT fresh. No accumulation, no dependency on as_of index.
-            await conn.execute(
-                text("""
-                    DELETE FROM standings
-                    WHERE competition_season_id = cast(:season_id as uuid)
-                      AND group_id = cast(:group_id as uuid)
-                      AND team_id = cast(:team_id as uuid)
-                """),
-                {"season_id": season["competition_season_id"], "group_id": group_id, "team_id": team_id},
-            )
-            await conn.execute(
-                text("""
-                    INSERT INTO standings (
-                      competition_season_id, group_id, team_id, position,
-                      played, wins, draws, losses,
-                      goals_for, goals_against, goal_difference, points, as_of,
-                      source
-                    )
-                    VALUES (
-                      cast(:season_id as uuid), cast(:group_id as uuid), cast(:team_id as uuid), :position,
-                      :played, :wins, :draws, :losses,
-                      :gf, :ga, :gd, :points, :as_of,
-                      'FOOTBALL_DATA'
-                    )
-                """),
-                {
-                    "season_id": season["competition_season_id"],
-                    "group_id": group_id,
-                    "team_id": team_id,
-                    "position": entry.get("position"),
-                    "played": entry.get("playedGames", 0),
-                    "wins": entry.get("won", 0),
-                    "draws": entry.get("draw", 0),
-                    "losses": entry.get("lost", 0),
-                    "gf": entry.get("goalsFor", 0),
-                    "ga": entry.get("goalsAgainst", 0),
-                    "gd": entry.get("goalDifference", 0),
-                    "points": entry.get("points", 0),
-                    "as_of": as_of,
-                },
-            )
-            inserted += 1
+            for entry in (group_standing.get("table") or []):
+                source_team_id = str(entry["team"]["id"])
+                team_ref = await conn.execute(
+                    text("""
+                        SELECT entity_id::text FROM entity_external_refs
+                        WHERE source = 'FOOTBALL_DATA' AND source_entity_id = :tid AND entity_type = 'TEAM'
+                        LIMIT 1
+                    """),
+                    {"tid": source_team_id},
+                )
+                tr = team_ref.fetchone()
+                if not tr:
+                    continue
+                team_id = tr[0]
+
+                # The unique index includes as_of, so ON CONFLICT never fires when
+                # as_of changes between runs — it would always INSERT a new row.
+                # Fix: DELETE the existing row for this (season, group, team) first,
+                # then INSERT fresh. No accumulation, no dependency on as_of index.
+                await conn.execute(
+                    text("""
+                        DELETE FROM standings
+                        WHERE competition_season_id = cast(:season_id as uuid)
+                          AND group_id = cast(:group_id as uuid)
+                          AND team_id = cast(:team_id as uuid)
+                    """),
+                    {"season_id": season["competition_season_id"], "group_id": group_id, "team_id": team_id},
+                )
+                await conn.execute(
+                    text("""
+                        INSERT INTO standings (
+                          competition_season_id, group_id, team_id, position,
+                          played, wins, draws, losses,
+                          goals_for, goals_against, goal_difference, points, as_of,
+                          source
+                        )
+                        VALUES (
+                          cast(:season_id as uuid), cast(:group_id as uuid), cast(:team_id as uuid), :position,
+                          :played, :wins, :draws, :losses,
+                          :gf, :ga, :gd, :points, :as_of,
+                          'FOOTBALL_DATA'
+                        )
+                    """),
+                    {
+                        "season_id": season["competition_season_id"],
+                        "group_id": group_id,
+                        "team_id": team_id,
+                        "position": entry.get("position"),
+                        "played": entry.get("playedGames", 0),
+                        "wins": entry.get("won", 0),
+                        "draws": entry.get("draw", 0),
+                        "losses": entry.get("lost", 0),
+                        "gf": entry.get("goalsFor", 0),
+                        "ga": entry.get("goalsAgainst", 0),
+                        "gd": entry.get("goalDifference", 0),
+                        "points": entry.get("points", 0),
+                        "as_of": as_of,
+                    },
+                )
+                inserted += 1
 
     return {"status": "OK", "job_name": "standings_refresh", "records_processed": inserted}
 
