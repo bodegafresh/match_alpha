@@ -248,17 +248,25 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
         # AI adjustment: enrich Poisson baseline with OpenAI context
         raw_probs = result.get("probabilities", {})
         if raw_probs and all(k in raw_probs for k in ("HOME", "DRAW", "AWAY")):
+            # Use nested savepoint so a DB failure inside AI adjustment
+            # doesn't abort the outer transaction and corrupt subsequent iterations.
             try:
-                ai_result = await adjust_predictions_with_ai(
-                    conn,
-                    match_id=m["match_id"],
-                    model_run_id=model_run_id,
-                    raw_probs=raw_probs,
-                )
-                if ai_result.get("status") == "ok":
-                    ai_adjusted += 1
+                async with conn.begin_nested() as ai_sp:
+                    try:
+                        ai_result = await adjust_predictions_with_ai(
+                            conn,
+                            match_id=m["match_id"],
+                            model_run_id=model_run_id,
+                            raw_probs=raw_probs,
+                        )
+                        await ai_sp.commit()
+                        if ai_result.get("status") == "ok":
+                            ai_adjusted += 1
+                    except Exception as ai_exc:
+                        await ai_sp.rollback()
+                        log.warning("AI adjustment failed for match %s: %s", m["match_id"], ai_exc)
             except Exception as ai_exc:
-                log.warning("AI adjustment failed for match %s: %s", m["match_id"], ai_exc)
+                log.warning("AI adjustment savepoint failed for match %s: %s", m["match_id"], ai_exc)
 
     # Update model run status
     db_run_status = "SUCCEEDED" if errors == 0 else "FAILED"
