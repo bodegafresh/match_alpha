@@ -364,120 +364,52 @@ class StandingsResolver:
         return [dict(r._mapping) for r in result]
 
     async def _get_finished_group_matches(self, competition_season_id: str) -> list[dict]:
-        """Get FINISHED matches in GROUP_STAGE, joined to their group via standings.
-        Tries to include fair_play_score and fifa_ranking; degrades gracefully if unavailable."""
-        try:
-            result = await self.conn.execute(
-                text("""
-                    SELECT DISTINCT ON (m.match_id)
-                        m.match_id::text,
-                        m.home_score,
-                        m.away_score,
-                        sh.group_id::text,
-                        cg.group_code,
-                        home_p.team_id::text  AS home_team_id,
-                        ht.display_name       AS home_name,
-                        away_p.team_id::text  AS away_team_id,
-                        at_.display_name      AS away_name,
-                        coalesce((s_home.fair_play_score)::int, 0) AS home_fair_play_score,
-                        coalesce((s_away.fair_play_score)::int, 0) AS away_fair_play_score,
-                        coalesce((ht.metadata->>'fifa_ranking')::int, 999) AS home_fifa_ranking,
-                        coalesce((at_.metadata->>'fifa_ranking')::int, 999) AS away_fifa_ranking
-                    FROM matches m
-                    JOIN competition_stages cs
-                      ON cs.stage_id = m.stage_id AND cs.stage_type = 'GROUP_STAGE'
-                    JOIN match_participants home_p
-                      ON home_p.match_id = m.match_id
-                     AND home_p.side = 'HOME'
-                     AND home_p.participant_role = 'TEAM'
-                    JOIN match_participants away_p
-                      ON away_p.match_id = m.match_id
-                     AND away_p.side = 'AWAY'
-                     AND away_p.participant_role = 'TEAM'
-                    JOIN teams ht  ON ht.team_id  = home_p.team_id
-                    JOIN teams at_ ON at_.team_id = away_p.team_id
-                    -- Link match to group via the home team's standing
-                    JOIN standings sh
-                      ON sh.team_id = home_p.team_id
-                     AND sh.competition_season_id = m.competition_season_id
-                     AND sh.group_id IS NOT NULL
-                    JOIN competition_groups cg ON cg.group_id = sh.group_id
-                    -- Verify away team is in the same group
-                    JOIN standings sa
-                      ON sa.team_id = away_p.team_id
-                     AND sa.group_id = sh.group_id
-                    -- Latest standings for fair_play_score (home/away)
-                    LEFT JOIN LATERAL (
-                        SELECT fair_play_score
-                        FROM standings
-                        WHERE team_id = home_p.team_id
-                          AND competition_season_id = m.competition_season_id
-                          AND group_id IS NOT NULL
-                        ORDER BY as_of DESC
-                        LIMIT 1
-                    ) s_home ON true
-                    LEFT JOIN LATERAL (
-                        SELECT fair_play_score
-                        FROM standings
-                        WHERE team_id = away_p.team_id
-                          AND competition_season_id = m.competition_season_id
-                          AND group_id IS NOT NULL
-                        ORDER BY as_of DESC
-                        LIMIT 1
-                    ) s_away ON true
-                    WHERE m.competition_season_id = cast(:sid as uuid)
-                      AND m.status = 'FINISHED'
-                    ORDER BY m.match_id, sh.as_of DESC
-                """),
-                {"sid": competition_season_id},
-            )
-            return [dict(r._mapping) for r in result]
-        except Exception as exc:
-            log.warning(
-                "standings_resolver: fair_play/ranking columns unavailable (%s), falling back", exc
-            )
-            result = await self.conn.execute(
-                text("""
-                    SELECT DISTINCT ON (m.match_id)
-                        m.match_id::text,
-                        m.home_score,
-                        m.away_score,
-                        sh.group_id::text,
-                        cg.group_code,
-                        home_p.team_id::text  AS home_team_id,
-                        ht.display_name       AS home_name,
-                        away_p.team_id::text  AS away_team_id,
-                        at_.display_name      AS away_name
-                    FROM matches m
-                    JOIN competition_stages cs
-                      ON cs.stage_id = m.stage_id AND cs.stage_type = 'GROUP_STAGE'
-                    JOIN match_participants home_p
-                      ON home_p.match_id = m.match_id
-                     AND home_p.side = 'HOME'
-                     AND home_p.participant_role = 'TEAM'
-                    JOIN match_participants away_p
-                      ON away_p.match_id = m.match_id
-                     AND away_p.side = 'AWAY'
-                     AND away_p.participant_role = 'TEAM'
-                    JOIN teams ht  ON ht.team_id  = home_p.team_id
-                    JOIN teams at_ ON at_.team_id = away_p.team_id
-                    -- Link match to group via the home team's standing
-                    JOIN standings sh
-                      ON sh.team_id = home_p.team_id
-                     AND sh.competition_season_id = m.competition_season_id
-                     AND sh.group_id IS NOT NULL
-                    JOIN competition_groups cg ON cg.group_id = sh.group_id
-                    -- Verify away team is in the same group
-                    JOIN standings sa
-                      ON sa.team_id = away_p.team_id
-                     AND sa.group_id = sh.group_id
-                    WHERE m.competition_season_id = cast(:sid as uuid)
-                      AND m.status = 'FINISHED'
-                    ORDER BY m.match_id, sh.as_of DESC
-                """),
-                {"sid": competition_season_id},
-            )
-            return [dict(r._mapping) for r in result]
+        """Get FINISHED GROUP_STAGE matches with FIFA ranking from teams.metadata.
+        fair_play_score defaults to 0 (column may not exist in standings yet)."""
+        result = await self.conn.execute(
+            text("""
+                SELECT DISTINCT ON (m.match_id)
+                    m.match_id::text,
+                    m.home_score,
+                    m.away_score,
+                    sh.group_id::text,
+                    cg.group_code,
+                    home_p.team_id::text  AS home_team_id,
+                    ht.display_name       AS home_name,
+                    away_p.team_id::text  AS away_team_id,
+                    at_.display_name      AS away_name,
+                    0                     AS home_fair_play_score,
+                    0                     AS away_fair_play_score,
+                    coalesce((ht.metadata->>'fifa_ranking')::int, 999) AS home_fifa_ranking,
+                    coalesce((at_.metadata->>'fifa_ranking')::int, 999) AS away_fifa_ranking
+                FROM matches m
+                JOIN competition_stages cs
+                  ON cs.stage_id = m.stage_id AND cs.stage_type = 'GROUP_STAGE'
+                JOIN match_participants home_p
+                  ON home_p.match_id = m.match_id
+                 AND home_p.side = 'HOME'
+                 AND home_p.participant_role = 'TEAM'
+                JOIN match_participants away_p
+                  ON away_p.match_id = m.match_id
+                 AND away_p.side = 'AWAY'
+                 AND away_p.participant_role = 'TEAM'
+                JOIN teams ht  ON ht.team_id  = home_p.team_id
+                JOIN teams at_ ON at_.team_id = away_p.team_id
+                JOIN standings sh
+                  ON sh.team_id = home_p.team_id
+                 AND sh.competition_season_id = m.competition_season_id
+                 AND sh.group_id IS NOT NULL
+                JOIN competition_groups cg ON cg.group_id = sh.group_id
+                JOIN standings sa
+                  ON sa.team_id = away_p.team_id
+                 AND sa.group_id = sh.group_id
+                WHERE m.competition_season_id = cast(:sid as uuid)
+                  AND m.status = 'FINISHED'
+                ORDER BY m.match_id, sh.as_of DESC
+            """),
+            {"sid": competition_season_id},
+        )
+        return [dict(r._mapping) for r in result]
 
     async def _upsert_standings(
         self,
