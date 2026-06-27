@@ -303,7 +303,7 @@ async def get_matches_needing_snapshots(
     """Return match_ids that need feature snapshot building or refresh."""
     rows = await conn.execute(
         text("""
-            SELECT DISTINCT m.match_id::text
+            SELECT DISTINCT m.match_id::text, m.kickoff_at
             FROM matches m
             WHERE m.kickoff_at BETWEEN now() - make_interval(days => :days_behind)
                                     AND now() + make_interval(days => :days_ahead)
@@ -318,4 +318,4 @@ async def get_matches_needing_snapshots(
         """),
         {"days_behind": days_behind, "days_ahead": days_ahead, "version": FEATURE_SET_VERSION},
     )
-    return [r[0] for r in rows]
+    return [r[0] for r in rows]  # r[0] = match_id::text, r[1] = kickoff_at (for ORDER BY)

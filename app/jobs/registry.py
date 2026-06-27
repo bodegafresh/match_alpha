@@ -161,18 +161,28 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
         return {"status": "WARN", "job_name": "model_recompute", "records_processed": 0, "message": "season not found"}
     season_id = r[0]
 
+    # Get 1X2 market_id (required NOT NULL column)
+    mkt_row = await conn.execute(
+        text("SELECT market_id::text FROM markets WHERE market_code = '1X2' LIMIT 1")
+    )
+    mkt = mkt_row.fetchone()
+    if not mkt:
+        return {"status": "WARN", "job_name": "model_recompute", "records_processed": 0, "message": "1X2 market not found"}
+    market_id_1x2 = mkt[0]
+
     # Create model run
     run_row = await conn.execute(
         text("""
-            INSERT INTO model_runs (model_id, competition_season_id, run_status, prediction_as_of,
+            INSERT INTO model_runs (model_id, competition_season_id, market_id, run_status, prediction_as_of,
                                     feature_set_version, dataset_version, params)
-            VALUES (cast(:model_id as uuid), cast(:season_id as uuid), 'STARTED', :as_of,
+            VALUES (cast(:model_id as uuid), cast(:season_id as uuid), cast(:market_id as uuid), 'STARTED', :as_of,
                     'v1', 'v1', cast(:params as jsonb))
             RETURNING model_run_id::text
         """),
         {
             "model_id": model_id,
             "season_id": season_id,
+            "market_id": market_id_1x2,
             "as_of": utc_now(),
             "params": json.dumps({"model": "poisson_elo_v1"}),
         },
@@ -489,13 +499,13 @@ async def _upsert_odds_snapshot(
             INSERT INTO odds_snapshots (
               match_id, bookmaker_id, market_id, selection_id,
               source, source_snapshot_id, line,
-              decimal_odds, implied_probability, captured_at
+              decimal_odds, captured_at
             )
             VALUES (
               cast(:match_id as uuid), cast(:bm_id as uuid),
               cast(:mkt_id as uuid), cast(:sel_id as uuid),
               'THE_ODDS_API', :ssid, :line,
-              :decimal_odds, :implied_prob, :captured_at
+              :decimal_odds, :captured_at
             )
             ON CONFLICT DO NOTHING
         """),
@@ -507,7 +517,6 @@ async def _upsert_odds_snapshot(
             "ssid": source_snapshot_id,
             "line": line,
             "decimal_odds": decimal_odds,
-            "implied_prob": round(1.0 / decimal_odds, 6),
             "captured_at": captured_at,
         },
     )
@@ -542,7 +551,7 @@ async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) 
     # Get active seasons with football_data source
     season_rows = await conn.execute(
         text("""
-            SELECT cs.competition_season_id::text, cs.slug, cs.stage_id::text AS default_stage_id
+            SELECT cs.competition_season_id::text, cs.slug
             FROM competition_seasons cs
             WHERE cs.status = 'ACTIVE' OR cs.status = 'BETTABLE'
             LIMIT 5

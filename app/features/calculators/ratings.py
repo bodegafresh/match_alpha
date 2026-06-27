@@ -93,15 +93,17 @@ async def upsert_rating_snapshot(
     rating_type: str,
     rating_value: float,
     as_of: datetime,
+    competition_season_id: str | None = None,
 ) -> None:
     await conn.execute(
         text("""
-            INSERT INTO rating_snapshots (team_id, rating_type, rating_value, as_of)
-            VALUES (cast(:team_id as uuid), :rating_type, :rating_value, :as_of)
-            ON CONFLICT (team_id, rating_type, as_of)
+            INSERT INTO rating_snapshots (competition_season_id, team_id, rating_type, rating_value, as_of)
+            VALUES (cast(:cs_id as uuid), cast(:team_id as uuid), :rating_type, :rating_value, :as_of)
+            ON CONFLICT (competition_season_id, team_id, rating_type, as_of)
             DO UPDATE SET rating_value = excluded.rating_value
         """),
         {
+            "cs_id": competition_season_id,
             "team_id": team_id,
             "rating_type": rating_type,
             "rating_value": round(rating_value, 4),
@@ -115,6 +117,7 @@ async def _fetch_unprocessed_matches(conn: AsyncConnection) -> list[dict[str, An
         text("""
             SELECT
               m.match_id::text,
+              m.competition_season_id::text,
               m.kickoff_at,
               m.home_score,
               m.away_score,
@@ -148,6 +151,7 @@ async def _fetch_all_finished_matches(conn: AsyncConnection) -> list[dict[str, A
         text("""
             SELECT
               m.match_id::text,
+              m.competition_season_id::text,
               m.kickoff_at,
               m.home_score,
               m.away_score,
@@ -187,6 +191,7 @@ async def _process_matches_for_elo_type(
         away_id = match["away_team_id"]
         kickoff = match["kickoff_at"]
         stage_type = match.get("stage_type")
+        cs_id = match.get("competition_season_id")
 
         if elo_type == "ELO_INTERNATIONAL" and comp_type not in _INTERNATIONAL_TYPES:
             continue
@@ -198,8 +203,8 @@ async def _process_matches_for_elo_type(
 
         # Store PRE-match snapshot (this is what features will read)
         pre_kickoff = kickoff - timedelta(seconds=1)
-        await upsert_rating_snapshot(conn, home_id, elo_type, home_r, pre_kickoff)
-        await upsert_rating_snapshot(conn, away_id, elo_type, away_r, pre_kickoff)
+        await upsert_rating_snapshot(conn, home_id, elo_type, home_r, pre_kickoff, cs_id)
+        await upsert_rating_snapshot(conn, away_id, elo_type, away_r, pre_kickoff, cs_id)
 
         result = _match_result(match["home_score"], match["away_score"])
         k = _k_factor(stage_type, elo_type)
@@ -208,8 +213,8 @@ async def _process_matches_for_elo_type(
         ratings[away_id] = elo_update(away_r, home_r, 1.0 - result, k)
 
         # Store POST-match snapshot
-        await upsert_rating_snapshot(conn, home_id, elo_type, ratings[home_id], kickoff)
-        await upsert_rating_snapshot(conn, away_id, elo_type, ratings[away_id], kickoff)
+        await upsert_rating_snapshot(conn, home_id, elo_type, ratings[home_id], kickoff, cs_id)
+        await upsert_rating_snapshot(conn, away_id, elo_type, ratings[away_id], kickoff, cs_id)
 
 
 async def update_elo_from_recent_matches(conn: AsyncConnection) -> dict[str, Any]:
