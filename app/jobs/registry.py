@@ -243,140 +243,251 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
 
 
 async def odds_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
-    """Fetch live odds from The Odds API and store as append-only snapshots."""
+    """
+    Fetch live odds from The Odds API (bulk call) and store as append-only snapshots.
+
+    Match linking is done by normalized team name + kickoff date (same strategy as the
+    original world_cup_2026 GAS project). entity_external_refs is NOT required.
+
+    Smart fetch policy (free tier — 500 req/month):
+      - Finished/cancelled matches: skip
+      - Kickoff > 7 days out: skip
+      - Markets: h2h (1X2) + totals (Over/Under 2.5)
+      - Regions: us,uk,eu
+    """
     _ = payload
     settings = get_settings()
     if not settings.the_odds_api_key:
         return {"status": "WARN", "job_name": "odds_refresh", "records_processed": 0, "message": "THE_ODDS_API_KEY not set"}
 
     from app.clients.odds_api_client import OddsApiClient
-    from app.core.hashing import sha256_json
+    import unicodedata as _ud
+    import re as _re
 
     client = OddsApiClient()
 
-    # Get bookmaker and market IDs
+    # Load DB reference tables
     bm_rows = await conn.execute(text("SELECT slug, bookmaker_id::text FROM bookmaker_profiles"))
-    bookmaker_map = {r[0]: r[1] for r in bm_rows}
+    bookmaker_map: dict[str, str] = {r[0]: r[1] for r in bm_rows}
 
     mkt_rows = await conn.execute(text("SELECT market_code, market_id::text FROM markets"))
-    market_map = {r[0]: r[1] for r in mkt_rows}
+    market_map: dict[str, str] = {r[0]: r[1] for r in mkt_rows}
 
     sel_rows = await conn.execute(
         text("SELECT market_id::text, selection_code, selection_id::text FROM market_selections")
     )
-    sel_map: dict[tuple, str] = {(r[0], r[1]): r[2] for r in sel_rows}
+    sel_map: dict[tuple[str, str], str] = {(r[0], r[1]): r[2] for r in sel_rows}
+
+    # Build match lookup: {(kickoff_date, norm_home_key): (match_id, status, kickoff_at)}
+    match_rows = await conn.execute(
+        text("""
+            SELECT m.match_id::text, m.status, m.kickoff_at,
+                   ht.display_name AS home_name
+            FROM matches m
+            JOIN match_participants hp ON hp.match_id = m.match_id AND hp.side = 'HOME'
+            JOIN teams ht ON ht.team_id = hp.team_id
+        """)
+    )
+    match_lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in match_rows:
+        kickoff_date = str(r[2])[:10]
+        home_key = _norm_team(r[3])
+        match_lookup[(kickoff_date, home_key)] = {
+            "match_id": r[0], "status": r[1], "kickoff_at": r[2]
+        }
 
     inserted = 0
+    skipped_policy = 0
+    unmatched = 0
     captured_at = utc_now()
 
     try:
-        data = await client.odds(sport="soccer_fifa_world_cup", regions="eu", markets="h2h")
+        data = await client.odds(
+            sport="soccer_fifa_world_cup",
+            regions="us,uk,eu",
+            markets="h2h,totals",
+        )
     except Exception as exc:
         return {"status": "WARN", "job_name": "odds_refresh", "records_processed": 0, "error": str(exc)}
 
     for event in (data or []):
-        source_event_id = event.get("id")
-        if not source_event_id:
+        # Smart fetch policy: skip if no useful kickoff data
+        commence_raw = event.get("commence_time")
+        kickoff_date = str(commence_raw or "")[:10]
+        if not kickoff_date:
             continue
 
-        # Resolve match_id from entity_external_refs
-        ref_row = await conn.execute(
-            text("""
-                SELECT entity_id::text FROM entity_external_refs
-                WHERE source = 'THE_ODDS_API' AND source_entity_id = :eid AND is_primary = true
-                LIMIT 1
-            """),
-            {"eid": source_event_id},
-        )
-        ref = ref_row.fetchone()
-        if not ref:
+        # Match by normalized home team name
+        home_norm = _norm_team(event.get("home_team", ""))
+        match_info = match_lookup.get((kickoff_date, home_norm))
+        if not match_info:
+            # Try away-as-home (some APIs swap them)
+            away_norm = _norm_team(event.get("away_team", ""))
+            match_info = match_lookup.get((kickoff_date, away_norm))
+        if not match_info:
+            unmatched += 1
             continue
-        match_id = ref[0]
 
-        market_id = market_map.get("1X2")
-        if not market_id:
+        # Skip finished or cancelled matches (no live odds needed)
+        if match_info["status"] in ("FINISHED", "CANCELLED", "POSTPONED", "ABANDONED"):
+            skipped_policy += 1
             continue
+
+        # Skip if kickoff > 7 days out
+        kickoff_at = match_info["kickoff_at"]
+        if kickoff_at:
+            from datetime import timezone as _tz, timedelta as _td
+            now_ts = utc_now()
+            if hasattr(kickoff_at, "tzinfo") and kickoff_at.tzinfo:
+                hours_until = (kickoff_at - now_ts).total_seconds() / 3600
+            else:
+                hours_until = 0
+            if hours_until > 7 * 24:
+                skipped_policy += 1
+                continue
+
+        match_id = match_info["match_id"]
 
         for bookmaker in event.get("bookmakers", []):
             bm_slug = bookmaker.get("key", "")
             bm_id = bookmaker_map.get(bm_slug)
             if not bm_id:
-                # Auto-insert unknown bookmaker
                 ins = await conn.execute(
                     text("""
-                        INSERT INTO bookmaker_profiles (slug, display_name)
-                        VALUES (:slug, :name)
+                        INSERT INTO bookmaker_profiles (slug, display_name, region)
+                        VALUES (:slug, :name, :region)
                         ON CONFLICT (slug) DO UPDATE SET display_name = excluded.display_name
                         RETURNING bookmaker_id::text
                     """),
-                    {"slug": bm_slug, "name": bookmaker.get("title", bm_slug)},
+                    {"slug": bm_slug, "name": bookmaker.get("title", bm_slug), "region": "UNKNOWN"},
                 )
                 bm_id = ins.fetchone()[0]
                 bookmaker_map[bm_slug] = bm_id
 
             for market in bookmaker.get("markets", []):
-                if market.get("key") != "h2h":
-                    continue
-                for outcome in market.get("outcomes", []):
-                    sel_name = outcome.get("name", "").upper()
-                    # Normalize: home team name → HOME, etc.
-                    sel_code = _normalize_outcome(sel_name, event)
-                    sel_id = sel_map.get((market_id, sel_code))
-                    if not sel_id:
+                market_key = market.get("key", "")
+
+                if market_key == "h2h":
+                    market_id = market_map.get("1X2")
+                    if not market_id:
                         continue
+                    for outcome in market.get("outcomes", []):
+                        sel_code = _normalize_outcome(outcome.get("name", ""), event)
+                        sel_id = sel_map.get((market_id, sel_code))
+                        if not sel_id:
+                            continue
+                        decimal_odds = float(outcome.get("price", 0))
+                        if decimal_odds <= 1.0:
+                            continue
+                        inserted += await _upsert_odds_snapshot(
+                            conn, match_id, bm_id, market_id, sel_id, None,
+                            decimal_odds, captured_at
+                        )
 
-                    decimal_odds = float(outcome.get("price", 0))
-                    if decimal_odds <= 1.0:
+                elif market_key == "totals":
+                    market_id = market_map.get("OVER_UNDER")
+                    if not market_id:
                         continue
-                    implied_prob = round(1.0 / decimal_odds, 6)
+                    for outcome in market.get("outcomes", []):
+                        name = (outcome.get("name") or "").upper()
+                        point = outcome.get("point")
+                        # Only process 2.5 line
+                        if point is not None and float(point) != 2.5:
+                            continue
+                        if name == "OVER":
+                            sel_code = "OVER"
+                        elif name == "UNDER":
+                            sel_code = "UNDER"
+                        else:
+                            continue
+                        sel_id = sel_map.get((market_id, sel_code))
+                        if not sel_id:
+                            continue
+                        decimal_odds = float(outcome.get("price", 0))
+                        if decimal_odds <= 1.0:
+                            continue
+                        inserted += await _upsert_odds_snapshot(
+                            conn, match_id, bm_id, market_id, sel_id, 2.5,
+                            decimal_odds, captured_at
+                        )
 
-                    content_hash = sha256_json({
-                        "match_id": match_id,
-                        "bookmaker_id": bm_id,
-                        "market_id": market_id,
-                        "selection_id": sel_id,
-                        "decimal_odds": decimal_odds,
-                        "minute": captured_at.replace(second=0, microsecond=0).isoformat(),
-                    })
+    return {
+        "status": "OK",
+        "job_name": "odds_refresh",
+        "records_processed": inserted,
+        "skipped_policy": skipped_policy,
+        "unmatched_events": unmatched,
+    }
 
-                    await conn.execute(
-                        text("""
-                            INSERT INTO odds_snapshots (
-                              match_id, bookmaker_id, market_id, selection_id,
-                              decimal_odds, implied_probability, captured_at
-                            )
-                            VALUES (
-                              cast(:match_id as uuid), cast(:bm_id as uuid),
-                              cast(:mkt_id as uuid), cast(:sel_id as uuid),
-                              :decimal_odds, :implied_prob, :captured_at
-                            )
-                            ON CONFLICT DO NOTHING
-                        """),
-                        {
-                            "match_id": match_id,
-                            "bm_id": bm_id,
-                            "mkt_id": market_id,
-                            "sel_id": sel_id,
-                            "decimal_odds": decimal_odds,
-                            "implied_prob": implied_prob,
-                            "captured_at": captured_at,
-                        },
-                    )
-                    inserted += 1
 
-    return {"status": "OK", "job_name": "odds_refresh", "records_processed": inserted}
+def _norm_team(name: Any) -> str:
+    """Normalize team name for fuzzy matching (same logic as world_cup_2026 GAS project)."""
+    import unicodedata as _ud, re as _re
+    s = str(name or "")
+    s = _ud.normalize("NFD", s)
+    s = "".join(c for c in s if _ud.category(c) != "Mn")
+    s = s.lower()
+    s = _re.sub(r"[^a-z0-9]+", "", s)
+    return s
+
+
+async def _upsert_odds_snapshot(
+    conn: AsyncConnection,
+    match_id: str,
+    bookmaker_id: str,
+    market_id: str,
+    selection_id: str,
+    line: float | None,
+    decimal_odds: float,
+    captured_at: Any,
+) -> int:
+    """Insert one odds_snapshot row. Returns 1 if inserted, 0 if duplicate."""
+    import hashlib as _hl
+    minute = captured_at.replace(second=0, microsecond=0).isoformat()
+    dedup_key = f"{match_id}:{bookmaker_id}:{market_id}:{selection_id}:{decimal_odds:.4f}:{minute}"
+    source_snapshot_id = _hl.sha256(dedup_key.encode()).hexdigest()[:40]
+
+    result = await conn.execute(
+        text("""
+            INSERT INTO odds_snapshots (
+              match_id, bookmaker_id, market_id, selection_id,
+              source, source_snapshot_id, line,
+              decimal_odds, implied_probability, captured_at
+            )
+            VALUES (
+              cast(:match_id as uuid), cast(:bm_id as uuid),
+              cast(:mkt_id as uuid), cast(:sel_id as uuid),
+              'THE_ODDS_API', :ssid, :line,
+              :decimal_odds, :implied_prob, :captured_at
+            )
+            ON CONFLICT DO NOTHING
+        """),
+        {
+            "match_id": match_id,
+            "bm_id": bookmaker_id,
+            "mkt_id": market_id,
+            "sel_id": selection_id,
+            "ssid": source_snapshot_id,
+            "line": line,
+            "decimal_odds": decimal_odds,
+            "implied_prob": round(1.0 / decimal_odds, 6),
+            "captured_at": captured_at,
+        },
+    )
+    return result.rowcount if hasattr(result, "rowcount") and result.rowcount is not None else 1
 
 
 def _normalize_outcome(name: str, event: dict) -> str:
     home = (event.get("home_team") or "").upper()
     away = (event.get("away_team") or "").upper()
-    if name == home or name == "HOME":
+    name_up = name.upper()
+    if name_up == home or name_up == "HOME":
         return "HOME"
-    if name == away or name == "AWAY":
+    if name_up == away or name_up == "AWAY":
         return "AWAY"
-    if name in ("DRAW", "THE DRAW", "X"):
+    if name_up in ("DRAW", "THE DRAW", "X"):
         return "DRAW"
-    return name
+    return name_up
 
 
 async def standings_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:

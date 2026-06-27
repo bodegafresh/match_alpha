@@ -674,6 +674,13 @@ class Supabase:
             } for index, letter in enumerate("ABCDEFGHIJKL")]
         return self.request("GET", table, None, query)
 
+    def insert_ignore(self, table: str, rows: list[dict[str, Any]]) -> None:
+        """INSERT rows, ignoring duplicates (ON CONFLICT DO NOTHING). Used for partial-index tables."""
+        if not rows:
+            return
+        for batch in chunks(rows, 500):
+            self.request("POST", table, batch, None, "resolution=ignore-duplicates,return=minimal")
+
     def update(self, table: str, row: dict[str, Any], query: dict[str, str]) -> None:
         if self.dry_run:
             print(json.dumps({"dry_run_update": table, "query": query, "row": row}, ensure_ascii=False, default=json_default))
@@ -2744,6 +2751,377 @@ def infer_slot_type(value: Any) -> str:
     return "STRUCTURAL"
 
 
+# ---------------------------------------------------------------------------
+# Bootstrap EV+ from Excel
+# ---------------------------------------------------------------------------
+
+LEGACY_BACKFILL_PAYLOAD: dict[str, Any] = {
+    "source": "LEGACY_BACKFILL",
+    "confidence": "low",
+    "requires_validation": True,
+    "bettable": False,
+}
+
+_MERCADO_MAP: dict[str, str] = {
+    "1X2": "1X2", "MATCH WINNER": "1X2", "RESULT": "1X2", "GANADOR": "1X2",
+    "OVER/UNDER 2.5": "OVER_UNDER", "OVER_UNDER": "OVER_UNDER",
+    "OVER/UNDER": "OVER_UNDER", "TOTALS": "OVER_UNDER",
+    "BTTS": "BTTS", "BOTH TEAMS TO SCORE": "BTTS", "AMBOS ANOTAN": "BTTS",
+}
+
+_SELECCION_MAP: dict[str, str] = {
+    "LOCAL": "HOME", "HOME": "HOME", "1": "HOME",
+    "EMPATE": "DRAW", "DRAW": "DRAW", "X": "DRAW",
+    "VISITANTE": "AWAY", "AWAY": "AWAY", "2": "AWAY",
+    "OVER 2.5": "OVER", "OVER": "OVER", "MAS DE 2.5": "OVER",
+    "UNDER 2.5": "UNDER", "UNDER": "UNDER", "MENOS DE 2.5": "UNDER",
+    "SI": "YES", "SÍ": "YES", "YES": "YES",
+    "NO": "NO",
+}
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _bootstrap_load_context(sb: Supabase) -> dict[str, Any]:
+    """Load market/selection/season IDs from DB."""
+    markets_raw = sb.select("markets", {"select": "market_id,market_code"})
+    markets = {m["market_code"]: m["market_id"] for m in markets_raw}
+
+    sels_raw = sb.select("market_selections", {"select": "selection_id,market_id,selection_code"})
+    sel_by_code: dict[tuple[str, str], str] = {
+        (s["market_id"], s["selection_code"]): s["selection_id"] for s in sels_raw
+    }
+
+    seasons_raw = sb.select("competition_seasons", {"select": "competition_season_id", "limit": "1"})
+    competition_season_id = seasons_raw[0]["competition_season_id"] if seasons_raw else None
+
+    return {"markets": markets, "sel_by_code": sel_by_code, "competition_season_id": competition_season_id}
+
+
+def _bootstrap_build_match_lookup(sb: Supabase) -> dict[tuple[str, str], str]:
+    """Build {(kickoff_date, home_team_key): match_id} from DB."""
+    # Fetch matches with participants
+    raw_matches = sb.select("matches", {"select": "match_id,kickoff_at"})
+    raw_participants = sb.select("match_participants", {"select": "match_id,side,team_id"})
+    raw_teams = sb.select("teams", {"select": "team_id,slug,display_name"})
+
+    team_key_by_id = {t["team_id"]: team_key(t["display_name"] or t["slug"] or "") for t in raw_teams}
+    home_by_match: dict[str, str] = {}
+    for p in raw_participants:
+        if p.get("side") == "HOME":
+            home_by_match[p["match_id"]] = team_key_by_id.get(p["team_id"], "")
+
+    lookup: dict[tuple[str, str], str] = {}
+    for m in raw_matches:
+        kickoff = (m.get("kickoff_at") or "")[:10]
+        home = home_by_match.get(m["match_id"], "")
+        if kickoff and home:
+            lookup[(kickoff, home)] = m["match_id"]
+    return lookup
+
+
+def _bootstrap_resolve_match(
+    lookup: dict[tuple[str, str], str],
+    local: Any,
+    visitante: Any,
+    fecha: Any,
+) -> str | None:
+    """Resolve (local, visitante, fecha) to match_id. Tries both home/away orders."""
+    date_str = ""
+    if isinstance(fecha, (datetime, date)):
+        date_str = str(fecha)[:10]
+    elif fecha:
+        date_str = str(fecha)[:10]
+    if not date_str:
+        return None
+    home_k = team_key(local)
+    away_k = team_key(visitante)
+    return lookup.get((date_str, home_k)) or lookup.get((date_str, away_k))
+
+
+def _bootstrap_ensure_model_run(sb: Supabase, ctx: dict[str, Any]) -> str:
+    """Ensure a legacy model_registry entry + model_run exist. Returns model_run_id."""
+    now = _now_utc_iso()
+    model_name = "poisson_legacy_import"
+
+    existing = sb.select("model_registry", {"select": "model_id", "model_name": f"eq.{model_name}"})
+    if existing and not sb.dry_run:
+        model_id = existing[0]["model_id"]
+    else:
+        model_id = str(uuid.uuid4())
+        sb.upsert("model_registry", [{
+            "model_id": model_id,
+            "model_name": model_name,
+            "model_version": "1.0.0",
+            "model_family": "POISSON",
+            "champion_status": "RETIRED",
+            "payload": {**LEGACY_BACKFILL_PAYLOAD, "imported_at": now},
+        }], "model_name", returning=False)
+
+    model_run_id = str(uuid.uuid4())
+    market_1x2 = ctx["markets"].get("1X2")
+    sb.upsert("model_runs", [{
+        "model_run_id": model_run_id,
+        "model_id": model_id,
+        "competition_season_id": ctx["competition_season_id"],
+        "market_id": market_1x2,
+        "run_status": "COMPLETED",
+        "prediction_as_of": now,
+        "started_at": now,
+        "finished_at": now,
+        "params": {**LEGACY_BACKFILL_PAYLOAD, "imported_at": now},
+    }], "model_run_id", returning=False)
+    return model_run_id
+
+
+def _bootstrap_ensure_bookmaker(sb: Supabase, slug: str, display_name: str) -> str:
+    """Upsert a bookmaker_profile by slug. Returns bookmaker_id."""
+    existing = sb.select("bookmaker_profiles", {"select": "bookmaker_id", "slug": f"eq.{slug}"})
+    if existing and not sb.dry_run:
+        return existing[0]["bookmaker_id"]
+    bookmaker_id = str(uuid.uuid4())
+    sb.upsert("bookmaker_profiles", [{
+        "bookmaker_id": bookmaker_id,
+        "slug": slug,
+        "display_name": display_name,
+        "region": "UNKNOWN",
+        "metadata": LEGACY_BACKFILL_PAYLOAD,
+    }], "slug", returning=False)
+    return bookmaker_id
+
+
+def bootstrap_model_predictions_from_poisson(
+    sb: Supabase,
+    data: dict[str, list[dict[str, Any]]],
+    ctx: dict[str, Any],
+    model_run_id: str,
+    match_lookup: dict[tuple[str, str], str],
+) -> int:
+    """Insert model_predictions from PoissonOdds sheet. Returns count of rows inserted."""
+    rows = get_rows(data, "PoissonOdds")
+    if not rows:
+        print("  bootstrap_model_predictions: PoissonOdds sheet not found or empty — skipping")
+        return 0
+
+    market_id = ctx["markets"].get("1X2")
+    if not market_id:
+        print("  bootstrap_model_predictions: 1X2 market not found in DB — skipping")
+        return 0
+
+    sel_by_code = ctx["sel_by_code"]
+    competition_season_id = ctx["competition_season_id"]
+    now = _now_utc_iso()
+
+    batch: list[dict[str, Any]] = []
+    skipped = 0
+    for row in rows:
+        match_id = _bootstrap_resolve_match(match_lookup, row.get("local"), row.get("visitante"), row.get("fecha"))
+        if not match_id:
+            skipped += 1
+            continue
+        as_of = str(row.get("updated_at") or now)[:26]
+        for sel_code, prob_field in [("HOME", "prob_home"), ("DRAW", "prob_draw"), ("AWAY", "prob_away")]:
+            prob_raw = row.get(prob_field)
+            if prob_raw is None:
+                continue
+            try:
+                prob = float(prob_raw)
+            except (TypeError, ValueError):
+                continue
+            if not (0 < prob < 1):
+                continue
+            selection_id = sel_by_code.get((market_id, sel_code))
+            if not selection_id:
+                continue
+            batch.append({
+                "prediction_id": str(uuid.uuid4()),
+                "model_run_id": model_run_id,
+                "feature_snapshot_id": None,
+                "competition_season_id": competition_season_id,
+                "match_id": match_id,
+                "market_id": market_id,
+                "selection_id": selection_id,
+                "raw_probability": prob,
+                "calibrated_probability": None,
+                "fair_odds": round(1.0 / prob, 4),
+                "as_of": as_of,
+                "prediction_status": "RAW_ONLY",
+                "confidence_score": None,
+                "explanation": {
+                    "model_family": "POISSON",
+                    "model_version": "LEGACY_IMPORT",
+                    "lambda_home": row.get("lambda_home"),
+                    "lambda_away": row.get("lambda_away"),
+                    "warnings": ["imported_from_excel", "not_calibrated"],
+                },
+                "payload": {**LEGACY_BACKFILL_PAYLOAD, "imported_at": now},
+            })
+
+    print(f"  bootstrap_model_predictions: {len(batch)} rows (skipped {skipped} unmatched matches)")
+    for chunk in chunks(batch, 100):
+        sb.upsert("model_predictions", chunk, "model_run_id,match_id,market_id,selection_id", returning=False)
+    return len(batch)
+
+
+def bootstrap_odds_snapshots_from_ev(
+    sb: Supabase,
+    data: dict[str, list[dict[str, Any]]],
+    ctx: dict[str, Any],
+    match_lookup: dict[tuple[str, str], str],
+    bookmaker_id: str,
+) -> int:
+    """Insert odds_snapshots from EvOpportunities sheet. Returns count of rows inserted."""
+    rows = get_rows(data, "EvOpportunities")
+    if not rows:
+        print("  bootstrap_odds_snapshots: EvOpportunities sheet not found or empty — skipping")
+        return 0
+
+    markets = ctx["markets"]
+    sel_by_code = ctx["sel_by_code"]
+    now = _now_utc_iso()
+
+    batch: list[dict[str, Any]] = []
+    skipped = 0
+    for row in rows:
+        match_id = _bootstrap_resolve_match(match_lookup, row.get("local"), row.get("visitante"), row.get("fecha"))
+        if not match_id:
+            skipped += 1
+            continue
+
+        mercado_raw = str(row.get("mercado") or "").upper().strip()
+        market_code = _MERCADO_MAP.get(mercado_raw)
+        if not market_code or market_code not in markets:
+            continue
+        market_id = markets[market_code]
+
+        seleccion_raw = str(row.get("seleccion") or "").upper().strip()
+        sel_code = _SELECCION_MAP.get(seleccion_raw)
+        if not sel_code:
+            # Try matching against team names
+            local_key = team_key(row.get("local") or "")
+            visit_key = team_key(row.get("visitante") or "")
+            sel_key = team_key(row.get("seleccion") or "")
+            if sel_key and sel_key == local_key:
+                sel_code = "HOME"
+            elif sel_key and sel_key == visit_key:
+                sel_code = "AWAY"
+        if not sel_code:
+            continue
+
+        selection_id = sel_by_code.get((market_id, sel_code))
+        if not selection_id:
+            continue
+
+        cuota_raw = row.get("cuota")
+        try:
+            cuota = float(cuota_raw)
+        except (TypeError, ValueError):
+            continue
+        if cuota <= 1.0:
+            continue
+
+        captured_at = str(row.get("timestamp") or now)[:26]
+        # Deterministic dedup key
+        dedup = f"{match_id}:{market_id}:{selection_id}:{cuota:.4f}"
+        source_snapshot_id = hashlib.sha256(dedup.encode()).hexdigest()[:40]
+
+        batch.append({
+            "odds_snapshot_id": str(uuid.uuid4()),
+            "match_id": match_id,
+            "bookmaker_id": bookmaker_id,
+            "source": "EXCEL_IMPORT",
+            "source_snapshot_id": source_snapshot_id,
+            "market_id": market_id,
+            "selection_id": selection_id,
+            "decimal_odds": cuota,
+            "implied_probability": round(1.0 / cuota, 6),
+            "captured_at": captured_at,
+            "payload": {**LEGACY_BACKFILL_PAYLOAD, "imported_at": now},
+        })
+
+    print(f"  bootstrap_odds_snapshots: {len(batch)} rows (skipped {skipped} unmatched matches)")
+    sb.insert_ignore("odds_snapshots", batch)
+    return len(batch)
+
+
+def _bootstrap_trigger_ev_decision(backend_url: str, internal_key: str, dry_run: bool) -> None:
+    """Trigger the ev_decision job on the backend to generate betting_decisions."""
+    endpoint = backend_url.rstrip("/") + "/api/v1/jobs/ev_decision/run"
+    if dry_run:
+        print(f"  [dry-run] Would POST {endpoint}")
+        return
+    if not internal_key:
+        print("  WARN: --internal-key not set, skipping ev_decision trigger. Run manually:")
+        print(f"    curl -X POST {endpoint} -H 'X-Internal-Key: YOUR_KEY'")
+        return
+    req = urllib.request.Request(
+        endpoint,
+        data=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Key": internal_key,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120, context=build_ssl_context(True)) as resp:
+            body = resp.read().decode("utf-8")
+            print(f"  ev_decision triggered → {body[:200]}")
+    except urllib.error.HTTPError as exc:
+        print(f"  WARN: ev_decision trigger failed HTTP {exc.code}: {exc.read().decode()[:200]}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  WARN: ev_decision trigger error: {exc}")
+
+
+def bootstrap_ev_from_excel(
+    sb: Supabase,
+    data: dict[str, list[dict[str, Any]]],
+    args: argparse.Namespace,
+) -> None:
+    """
+    Bootstrap model_predictions + odds_snapshots from Excel PoissonOdds/EvOpportunities sheets.
+    Then triggers the ev_decision job to generate betting_decisions.
+    All inserted data is marked LEGACY_BACKFILL and decision_status=PAPER_ONLY.
+    """
+    print("\n=== Bootstrap EV+ from Excel ===")
+    ctx = _bootstrap_load_context(sb)
+
+    missing = [k for k in ("1X2",) if k not in ctx["markets"]]
+    if missing:
+        print(f"  ERROR: required markets not found in DB: {missing}. Run migrations first.")
+        return
+    if not ctx["competition_season_id"]:
+        print("  ERROR: no competition_season in DB. Run base migration first.")
+        return
+
+    print("  Loading match lookup from DB...")
+    match_lookup = _bootstrap_build_match_lookup(sb)
+    print(f"  {len(match_lookup)} matches indexed")
+
+    print("  Ensuring legacy model_run...")
+    model_run_id = _bootstrap_ensure_model_run(sb, ctx)
+
+    print("  Inserting model_predictions from PoissonOdds...")
+    n_preds = bootstrap_model_predictions_from_poisson(sb, data, ctx, model_run_id, match_lookup)
+
+    print("  Ensuring bookmaker profile for Excel import...")
+    bookmaker_id = _bootstrap_ensure_bookmaker(sb, "excel_import", "Excel Import")
+
+    print("  Inserting odds_snapshots from EvOpportunities...")
+    n_odds = bootstrap_odds_snapshots_from_ev(sb, data, ctx, match_lookup, bookmaker_id)
+
+    print(f"\n  Summary: {n_preds} model_predictions, {n_odds} odds_snapshots inserted")
+    print("  Triggering ev_decision job...")
+    _bootstrap_trigger_ev_decision(
+        getattr(args, "backend_url", "https://match-alpha.onrender.com"),
+        getattr(args, "internal_key", None),
+        sb.dry_run,
+    )
+    print("=== Bootstrap EV+ complete ===\n")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Migrate WC2026 source data to clean Supabase schema.")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -2778,6 +3156,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     parser.add_argument("--insecure-skip-tls-verify", action="store_true", help="Disable TLS verification for Supabase requests. Use only as a temporary local workaround.")
+    # Bootstrap EV+ flags
+    parser.add_argument("--bootstrap-ev", action="store_true", help="Bootstrap model_predictions + odds_snapshots from PoissonOdds/EvOpportunities Excel sheets, then trigger ev_decision job.")
+    parser.add_argument("--backend-url", default=os.environ.get("BACKEND_URL", "https://match-alpha.onrender.com"), help="Backend URL for triggering jobs (used with --bootstrap-ev).")
+    parser.add_argument("--internal-key", default=os.environ.get("INTERNAL_JOB_KEY"), help="X-Internal-Key header value for backend job endpoints.")
     return parser.parse_args()
 
 
@@ -2794,6 +3176,8 @@ def main() -> None:
         data = load_xlsx(args.xlsx)
     sb = Supabase(args.supabase_url, args.supabase_key, args.dry_run, args.sleep_seconds, not args.insecure_skip_tls_verify)
     migrate(data, sb, args)
+    if args.bootstrap_ev:
+        bootstrap_ev_from_excel(sb, data, args)
 
 
 if __name__ == "__main__":
