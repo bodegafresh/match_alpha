@@ -1,0 +1,26 @@
+app/jobs/registry.py
+  s_acedc47d393e24::t_94627358c062eb 246-257,264-265,269,271,274,279-297,300-301,305-309,314-317,320-328,331-333,336-350,357-358,362,368,370-372,374-462,464-477,483-484,486,488,490
+  s_acedc47d393e24::t_d238768d9e8906 463
+scripts/migrate_wc2026_to_supabase.py
+  s_acedc47d393e24::t_807c5c33921d81 677-683
+  s_acedc47d393e24::t_ac362611b77668 3045
+  s_acedc47d393e24::t_77033cb336f1c3 3159-3162
+  s_acedc47d393e24::t_6e28610f1eb274 3179-3180
+  s_acedc47d393e24::t_c49a9a056e0bdb 2754-3044,3046-3124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "c9bdd6091a2c97b8e65311f2559c1039c0afc582",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
