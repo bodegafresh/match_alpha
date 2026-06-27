@@ -1,0 +1,32 @@
+supabase/migrations/020_standings_fair_play.sql
+  s_acedc47d393e24::t_85a174e34077b9 1-10
+app/core/config.py
+  s_acedc47d393e24::t_31fef2b4fe27ce 46-47
+app/services/qualification/standings_resolver.py
+  s_acedc47d393e24::t_5efc6fd63ba0d9 94-96,102
+  s_acedc47d393e24::t_351ab753ebbff0 487,507
+  s_acedc47d393e24::t_26bcaf2eb34428 69
+  s_acedc47d393e24::t_f5deafd5448aff 118,121-122,148-158,165
+  s_acedc47d393e24::t_4b84afb285bf19 351-386
+app/services/qualification/orchestrator.py
+  s_acedc47d393e24::t_cfcd9be95e8c42 18,20
+  s_acedc47d393e24::t_9e53e407697bf7 55-67
+app/services/notifications/slack.py
+  s_acedc47d393e24::t_da8629d7e0cd84 1-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "54aa8d3818ac8307845888afc926d0ef9a20d44a",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
