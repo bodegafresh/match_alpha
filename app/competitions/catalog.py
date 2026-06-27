@@ -127,7 +127,7 @@ LEAGUE_PHASE_RULES = {
 
 def groups_a_to_l() -> list[GroupConfig]:
     return [
-        GroupConfig(group_code=letter, group_name=f"Grupo {letter}", group_order=index + 1)
+        GroupConfig(group_code=f"Grupo {letter}", group_name=f"Grupo {letter}", group_order=index + 1)
         for index, letter in enumerate("ABCDEFGHIJKL")
     ]
 
