@@ -257,13 +257,17 @@ class TournamentSlotResolver:
 
         When allowed_groups is empty, the FIFA assignment matrix hasn't been configured —
         we return None to keep the slot PENDING_BEST_THIRD_MAPPING.
+
+        Normalizes group codes: "Grupo A" and "A" both match allowed_groups entry "A".
         """
         if not allowed_groups:
             return None
+        # Normalize to uppercase letters only so "Grupo A" matches "A"
+        normalized_allowed = {g.replace("Grupo ", "").strip().upper() for g in allowed_groups}
         qualified = [
             t for t in best_thirds
             if t["qualification_status"] == "QUALIFIED_BEST_THIRD"
-            and t["group_code"] in allowed_groups
+            and t["group_code"].replace("Grupo ", "").strip().upper() in normalized_allowed
             and not t.get("slot_assigned")
         ]
         if not qualified:
