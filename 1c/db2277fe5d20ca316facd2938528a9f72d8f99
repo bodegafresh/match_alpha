@@ -1,0 +1,21 @@
+app/features/calculators/ratings.py
+  s_acedc47d393e24::t_bd0980a5726f51 102
+app/models/poisson_predictor.py
+  s_acedc47d393e24::t_9aa654919c31c0 157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "1cdb2277fe5d20ca316facd2938528a9f72d8f99",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
