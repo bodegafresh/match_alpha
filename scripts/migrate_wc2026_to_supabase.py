@@ -2867,7 +2867,7 @@ def _bootstrap_ensure_model_run(sb: Supabase, ctx: dict[str, Any]) -> str:
         "model_id": model_id,
         "competition_season_id": ctx["competition_season_id"],
         "market_id": market_1x2,
-        "run_status": "COMPLETED",
+        "run_status": "SUCCEEDED",
         "prediction_as_of": now,
         "started_at": now,
         "finished_at": now,
