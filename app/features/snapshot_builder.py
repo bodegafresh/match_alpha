@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.core.config import get_settings
 from app.core.hashing import sha256_json
 from app.core.time import utc_now
 from app.features.calculators.match_context import (
@@ -221,13 +222,15 @@ async def build_match_feature_snapshots(
             "last_match_date": last_match_dt,
         })
 
+        settings = get_settings()
         secondary = {
             "win_prob_elo": round(elo_expected(elo_g, opp_g), 4),
             "form_sample_size": form["sample_size"],
             "feature_set_version": FEATURE_SET_VERSION,
             "lineup_available": False,
             "odds_available":   False,
-            "weather_available": False,
+            "weather_available": bool(settings.weather_api_key),
+            "news_available": True,  # Google News RSS — no key required
         }
 
         critical = {
