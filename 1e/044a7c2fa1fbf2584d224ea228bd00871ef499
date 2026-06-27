@@ -1,0 +1,24 @@
+app/features/snapshot_builder.py
+  s_acedc47d393e24::t_0883546bfcaf3e 47
+app/jobs/registry.py
+  s_acedc47d393e24::t_efc4945da34145 557
+  s_acedc47d393e24::t_b934e55ea0a024 199-200
+app/jobs/orchestrator.py
+  s_acedc47d393e24::t_6a7dbcaae33b21 60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "1e044a7c2fa1fbf2584d224ea228bd00871ef499",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
