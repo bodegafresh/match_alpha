@@ -1,0 +1,26 @@
+app/competitions/catalog.py
+  s_acedc47d393e24::t_f9e7bd7088f4cc 130
+app/services/qualification/slot_resolver.py
+  s_acedc47d393e24::t_51587bc1639dae 157
+  s_acedc47d393e24::t_7ac5a1f2b3e78d 58
+  s_acedc47d393e24::t_be47d75132202f 265,269
+  s_acedc47d393e24::t_6974b7853bfcb7 245-246
+app/competitions/service.py
+  s_acedc47d393e24::t_c49770df14b913 840
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "1da08a77dc64f68679f2a6b4abadde2713a7c000",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
