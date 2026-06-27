@@ -2856,9 +2856,9 @@ def _bootstrap_ensure_model_run(sb: Supabase, ctx: dict[str, Any]) -> str:
             "model_name": model_name,
             "model_version": "1.0.0",
             "model_family": "POISSON",
-            "champion_status": "RETIRED",
+            "champion_status": "ARCHIVED",
             "payload": {**LEGACY_BACKFILL_PAYLOAD, "imported_at": now},
-        }], "model_name", returning=False)
+        }], "model_name,model_version", returning=False)
 
     model_run_id = str(uuid.uuid4())
     market_1x2 = ctx["markets"].get("1X2")
@@ -2872,7 +2872,7 @@ def _bootstrap_ensure_model_run(sb: Supabase, ctx: dict[str, Any]) -> str:
         "started_at": now,
         "finished_at": now,
         "params": {**LEGACY_BACKFILL_PAYLOAD, "imported_at": now},
-    }], "model_run_id", returning=False)
+    }], "model_id,competition_season_id,market_id,prediction_as_of", returning=False)
     return model_run_id
 
 
