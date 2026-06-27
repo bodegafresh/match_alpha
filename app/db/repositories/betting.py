@@ -57,7 +57,7 @@ class BettingRepository(Repository):
             )
             values (
               :competition_season_id, :match_id, :prediction_id, :odds_snapshot_id,
-              cast(:decision_status as decision_status), cast(:risk_level as risk_level),
+              cast(:decision_status as betting_decision_status), cast(:risk_level as risk_level),
               :block_reason, cast(:block_reasons as jsonb), :calibrated_probability_used,
               :market_probability, :edge, :ev, :kelly_fraction, :stake_fraction, cast(:payload as jsonb)
             )
