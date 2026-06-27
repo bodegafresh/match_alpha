@@ -1,0 +1,38 @@
+app/services/qualification/slot_resolver.py
+  s_acedc47d393e24::t_fe7e3e1288e788 56-66,73
+  s_acedc47d393e24::t_0178ad3e1c47de 145,151-176
+  s_acedc47d393e24::t_0b773eeadce3de 27
+  s_acedc47d393e24::t_981f7e9845ea0c 107
+app/services/qualification/models.py
+  s_acedc47d393e24::t_bcd5e52d298f8b 33-34
+  s_acedc47d393e24::t_846379bfed0e13 54-55
+tests/test_qualification/test_best_third.py
+  s_acedc47d393e24::t_225a2662d94843 1-91
+app/services/qualification/assignment_matrix.py
+  s_acedc47d393e24::t_8f6b96936a336e 1-71
+tests/test_qualification/test_assignment_matrix.py
+  s_acedc47d393e24::t_b6e43de684f026 1-79
+tests/test_qualification/test_standings_resolver.py
+  s_acedc47d393e24::t_28f1f88abe01a0 1-177
+app/services/qualification/standings_resolver.py
+  s_acedc47d393e24::t_a075932d412f23 243-246,249
+  s_acedc47d393e24::t_bcf7908b12a782 4-14,43-46,90-97,103-104,110-112,164-166,168,173,178-181,188,193-242,247-248,250-265,267,272-276,278,282-286,288,291,293-325,327,329-335,367-480
+app/services/qualification/best_third_resolver.py
+  s_acedc47d393e24::t_b50a7a5449773f 4,8-10,38-39,100-101,111,113-120,123-132,134-135,137,141-149,169-225,227-237
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "b7dc6b15c99ceb2dd9e7f22a2faa6fb58bd0e72e",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
