@@ -1,3 +1,4 @@
+import asyncio
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -256,6 +257,59 @@ def _match_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _fetch_weather_for_city(city: str | None, country: str | None) -> dict:
+    """Fetch current weather from WeatherAPI. Returns {} if no key or city."""
+    settings = get_settings()
+    if not settings.weather_api_key or not city:
+        return {}
+    import httpx
+    try:
+        location = f"{city},{country or ''}".strip(",")
+        async with httpx.AsyncClient(timeout=6) as client:
+            r = await client.get(
+                "https://api.weatherapi.com/v1/current.json",
+                params={"key": settings.weather_api_key, "q": location, "aqi": "no"},
+            )
+            if r.status_code == 200:
+                current = r.json().get("current", {})
+                return {
+                    "temperature_c": current.get("temp_c"),
+                    "condition": current.get("condition", {}).get("text"),
+                    "wind_kph": current.get("wind_kph"),
+                    "humidity_pct": current.get("humidity"),
+                }
+    except Exception:
+        pass
+    return {}
+
+
+async def _enrich_weather(matches: list[dict]) -> list[dict]:
+    """Fetch weather concurrently for matches that lack it, using venue city."""
+    needs_weather = [
+        m for m in matches
+        if not m.get("weather") and m.get("venue", {}).get("city")
+    ]
+    if not needs_weather:
+        return matches
+
+    results = await asyncio.gather(*[
+        _fetch_weather_for_city(
+            m["venue"]["city"],
+            m["venue"].get("country_code"),
+        )
+        for m in needs_weather
+    ], return_exceptions=True)
+
+    weather_map = {
+        m["match_id"]: (r if isinstance(r, dict) else {})
+        for m, r in zip(needs_weather, results)
+    }
+    for m in matches:
+        if m["match_id"] in weather_map and weather_map[m["match_id"]]:
+            m["weather"] = weather_map[m["match_id"]]
+    return matches
+
+
 @router.get("/matches")
 async def web_matches(
     season: str | None = None,
@@ -270,9 +324,10 @@ async def web_matches(
         _parse_utc_datetime(kickoff_from),
         _parse_utc_datetime(kickoff_to),
     )
+    matches = await _enrich_weather([_match_from_row(row) for row in rows])
     data = {
         "season": {"slug": season or settings.default_season_slug},
-        "matches": [_match_from_row(row) for row in rows],
+        "matches": matches,
         "generated_at": iso_utc(),
     }
     return {"ok": True, "data": data}
@@ -301,7 +356,7 @@ async def web_matches_overview(
     kickoff_from = min(bounds) if bounds else None
     kickoff_to = max(bounds) if bounds else None
     repo = PublishedRepository(conn)
-    rows = [_match_from_row(row) for row in await repo.match_schedule(season_slug, kickoff_from, kickoff_to)]
+    rows = await _enrich_weather([_match_from_row(row) for row in await repo.match_schedule(season_slug, kickoff_from, kickoff_to)])
 
     def in_range(row: dict[str, Any], start: str | None, end: str | None) -> bool:
         if not start and not end:
