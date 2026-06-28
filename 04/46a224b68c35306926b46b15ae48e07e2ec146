@@ -1,0 +1,24 @@
+supabase/migrations/019_update_published_views.sql
+  s_acedc47d393e24::t_f1d0b83e1ee4e5 51,54-55,58
+  s_acedc47d393e24::t_2f123ddafaf6a8 103,105-108
+  s_acedc47d393e24::t_ea5b30c45d3c00 85,122-123
+  s_acedc47d393e24::t_3967f916564304 15,35-43,79-80
+  s_acedc47d393e24::t_23e40a33815fd0 71,117
+  s_acedc47d393e24::t_82468414a437d3 75,121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "0446a224b68c35306926b46b15ae48e07e2ec146",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
