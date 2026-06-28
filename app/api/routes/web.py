@@ -589,34 +589,43 @@ async def news_ingest(
             row = res.fetchone()
             match_id = row[0] if row else None
 
-        pub_date = None
+        import uuid as _uuid
+        from email.utils import parsedate_to_datetime as _parse_rfc2822
+
+        pub_date_val: datetime | None = None
         if item.pub_date:
-            from email.utils import parsedate_to_datetime
             try:
-                pub_date = parsedate_to_datetime(item.pub_date).isoformat()
+                pub_date_val = _parse_rfc2822(item.pub_date)
             except Exception:
-                pub_date = item.pub_date  # pass through ISO strings as-is
+                try:
+                    pub_date_val = datetime.fromisoformat(item.pub_date.replace("Z", "+00:00"))
+                except Exception:
+                    pass
+
+        match_id_val = None
+        if match_id:
+            try:
+                match_id_val = _uuid.UUID(match_id)
+            except Exception:
+                match_id_val = None
 
         result = await conn.execute(
             text("""
                 INSERT INTO news_items (id_hash, match_id, home_team, away_team,
                                         title, url, source, pub_date)
-                VALUES (:id_hash,
-                        cast(:match_id as uuid),
-                        :home_team, :away_team,
-                        :title, :url, :source,
-                        cast(:pub_date as timestamptz))
+                VALUES (:id_hash, :match_id, :home_team, :away_team,
+                        :title, :url, :source, :pub_date)
                 ON CONFLICT (id_hash) DO NOTHING
             """),
             {
                 "id_hash": item.id_hash,
-                "match_id": match_id,
+                "match_id": match_id_val,
                 "home_team": item.home_team,
                 "away_team": item.away_team,
                 "title": item.title,
                 "url": item.url,
                 "source": item.source,
-                "pub_date": pub_date,
+                "pub_date": pub_date_val,
             },
         )
         inserted += result.rowcount
