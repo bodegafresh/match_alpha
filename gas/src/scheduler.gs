@@ -133,6 +133,30 @@ function runLiveBackendOrchestration() {
 }
 
 /**
+ * runWeeklyTeamsSync — corre domingos a las 2 AM UTC.
+ * Sincroniza equipos de todas las ligas del catálogo via API-Football.
+ * API-Football free tier: ~10 req/día — este job corre UNA VEZ POR SEMANA.
+ */
+function runWeeklyTeamsSync() {
+  return logBackendCronResult_(
+    'runWeeklyTeamsSync',
+    backendFetch_('/api/v1/jobs/sync_all_leagues_teams/run', { method: 'post', payload: { source: 'gas_weekly' } })
+  );
+}
+
+/**
+ * runWeeklyPlayersSync — corre domingos a las 3 AM UTC (1h después de teams).
+ * Sincroniza jugadores/planteles de todas las ligas del catálogo via API-Football.
+ * Separado 1h de teams para no agotar el quota de API-Football en un solo burst.
+ */
+function runWeeklyPlayersSync() {
+  return logBackendCronResult_(
+    'runWeeklyPlayersSync',
+    backendFetch_('/api/v1/jobs/sync_all_leagues_players/run', { method: 'post', payload: { source: 'gas_weekly' } })
+  );
+}
+
+/**
  * checkBackendHealth — opcional, correr 1 vez al día para monitoreo.
  * Llama al nuevo endpoint /jobs/status/health introducido en el audit.
  */
@@ -192,6 +216,8 @@ function runNewsSyncJob() {
  *   - News:       1 hora (9 AM UTC — 1h antes del daily, para que AI las lea)
  *   - Daily:      1 hora (10 AM UTC = 6 AM Chile, con guard interno de hora+idempotencia)
  *   - Live:       5 min  (actualización frecuente durante partidos WC2026)
+ *   - Teams sync: domingo 2 AM UTC (API-Football, free tier ~10 req/día)
+ *   - Players sync: domingo 3 AM UTC (1h después de teams para no agotar quota)
  */
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();
@@ -221,19 +247,40 @@ function installMatchAlphaTriggers() {
     .everyMinutes(5)
     .create();
 
+  // Weekly team/player sync — domingos de madrugada UTC para evitar interferir
+  // con el daily (10 AM UTC) y el live (durante partidos). API-Football free tier
+  // permite ~10 req/día → se separan 1h para no agotar en un solo burst.
+  var teamsSync = ScriptApp.newTrigger('runWeeklyTeamsSync')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
+    .atHour(2)
+    .inTimezone('UTC')
+    .create();
+
+  var playersSync = ScriptApp.newTrigger('runWeeklyPlayersSync')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
+    .atHour(3)
+    .inTimezone('UTC')
+    .create();
+
   var props = PropertiesService.getScriptProperties();
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'KEEPALIVE', keepalive.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'NEWS', news.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC', teamsSync.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC', playersSync.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min');
+  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM players=domingo-3AM');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
     news_trigger_id: news.getUniqueId(),
     daily_trigger_id: daily.getUniqueId(),
-    live_trigger_id: live.getUniqueId()
+    live_trigger_id: live.getUniqueId(),
+    teams_sync_trigger_id: teamsSync.getUniqueId(),
+    players_sync_trigger_id: playersSync.getUniqueId()
   };
 }
 
@@ -243,6 +290,8 @@ function removeMatchAlphaTriggers() {
     runNewsSyncJob: true,
     runDailyBackendOrchestration: true,
     runLiveBackendOrchestration: true,
+    runWeeklyTeamsSync: true,
+    runWeeklyPlayersSync: true,
     checkBackendLatestStatus: true,
     checkBackendHealth: true
   };
@@ -258,6 +307,8 @@ function removeMatchAlphaTriggers() {
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'NEWS');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE');
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC');
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC');
 
   return { ok: true, removed: true };
 }
