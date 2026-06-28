@@ -1,0 +1,45 @@
+app/jobs/registry.py
+  s_5464458db59e8d::t_30de95549878bc 39,900-908,922-1043,1098
+supabase/diagnostics/diag_expected_competition_stages.sql
+  s_5464458db59e8d::t_050fa55b95ba54 1-38
+app/jobs/orchestrator.py
+  s_5464458db59e8d::t_b4f41954b9331c 76-78
+app/services/notifications/telegram.py
+  s_5464458db59e8d::t_5ea5dc8812795f 86-94
+app/competitions/service.py
+  s_5464458db59e8d::t_eaf1a8289fda83 406-407,409
+supabase/diagnostics/diag_expected_competition_seasons.sql
+  s_5464458db59e8d::t_503deb23581d1e 1-26
+supabase/migrations/026_backfill_competition_stages_rules.sql
+  s_5464458db59e8d::t_6fd44c108c0a06 1-302
+gas/src/scheduler.gs
+  s_5464458db59e8d::t_15315db63df895 31,34,149-181,281-285,292,294,301-302,313,330
+README.md
+  s_5464458db59e8d::t_268a175b81aafa 34,57-61,64-66
+supabase/migrations/024_seed_competitions_and_seasons_catalog_expansion.sql
+  s_5464458db59e8d::t_26da8c92b97385 1-234
+supabase/migrations/025_backfill_missing_competition_seasons.sql
+  s_5464458db59e8d::t_43f286315225ab 1-181
+app/competitions/catalog.py
+  s_5464458db59e8d::t_b2735581238557 408,470,530-534,560-565,592-596,623-627,657-661,688-691
+app/services/qualification/orchestrator.py
+  s_5464458db59e8d::t_71e11678af8941 32,58-63
+docs/adding_new_competitions.md
+  s_5464458db59e8d::t_164c8b8c10ab1a 3-6,9,12-14,21-33,36-38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "b7fde16a22ecc61b0d15aefb9822081c3396d333",
+  "prompts": {},
+  "sessions": {
+    "s_5464458db59e8d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "07c90802-5b7f-4a48-9c11-612e4c1d71c7",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
