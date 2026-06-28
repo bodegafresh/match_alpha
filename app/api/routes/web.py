@@ -577,9 +577,9 @@ async def news_ingest(
                     JOIN match_participants hp ON hp.match_id = m.match_id AND hp.side = 'HOME'
                     JOIN teams ht ON ht.team_id = hp.team_id
                     JOIN match_participants ap ON ap.match_id = m.match_id AND ap.side = 'AWAY'
-                    JOIN teams at ON at.team_id = ap.team_id
+                    JOIN teams away_t ON away_t.team_id = ap.team_id
                     WHERE ht.display_name ILIKE :home
-                      AND at.display_name ILIKE :away
+                      AND away_t.display_name ILIKE :away
                       AND m.kickoff_at::date >= CURRENT_DATE - interval '1 day'
                     ORDER BY m.kickoff_at ASC
                     LIMIT 1
