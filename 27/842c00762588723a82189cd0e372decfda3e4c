@@ -1,0 +1,28 @@
+app/jobs/orchestrator.py
+  s_acedc47d393e24::t_c67d4694b3f423 54
+  s_acedc47d393e24::t_f0e536dfca2be7 249-250,259,266,274,281,286
+app/clients/api_football_client.py
+  s_acedc47d393e24::t_4a39cc1f831d03 56-64
+app/competitions/team_sync.py
+  s_acedc47d393e24::t_cb95bbe866541a 1-283
+app/jobs/registry.py
+  s_acedc47d393e24::t_5121ca5fc03735 925-928
+  s_acedc47d393e24::t_f2013a063c0b0c 19
+  s_acedc47d393e24::t_69644e69952be6 882-899
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "27842c00762588723a82189cd0e372decfda3e4c",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
