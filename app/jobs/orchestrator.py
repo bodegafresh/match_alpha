@@ -74,7 +74,9 @@ class JobOrchestrator:
         context = await self._build_context(live=True)
         plan = [
             OrchestratedJob("worldcup_live_refresh", requires_upcoming_matches=True),
-            OrchestratedJob("odds_refresh", requires_upcoming_matches=True),
+            # odds_refresh is NOT in the live plan — The Odds API free tier is 500 req/month.
+            # Running it every 5 min would consume ~8,640 req/month.
+            # Odds are refreshed once per day by the daily plan instead.
             OrchestratedJob("results_settlement", requires_finished_matches=True),
             OrchestratedJob("qualification_resolver"),
         ]

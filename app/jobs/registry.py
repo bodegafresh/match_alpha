@@ -300,6 +300,9 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
     }
 
 
+_ODDS_REFRESH_TTL_HOURS = 4  # minimum hours between calls to The Odds API (500 req/month budget)
+
+
 async def odds_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
     """
     Fetch live odds from The Odds API (bulk call) and store as append-only snapshots.
@@ -312,11 +315,35 @@ async def odds_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) -> di
       - Kickoff > 7 days out: skip
       - Markets: h2h (1X2) + totals (Over/Under 2.5)
       - Regions: us,uk,eu
+      - TTL 4h: skip if a successful run happened in the last 4 hours
     """
     _ = payload
     settings = get_settings()
     if not settings.the_odds_api_key:
         return {"status": "WARN", "job_name": "odds_refresh", "records_processed": 0, "message": "THE_ODDS_API_KEY not set"}
+
+    # TTL gate — respect The Odds API 500 req/month free tier budget.
+    # Skip if a successful run happened within the last _ODDS_REFRESH_TTL_HOURS hours.
+    recent = await conn.execute(
+        text("""
+            SELECT started_at FROM pipeline_runs
+            WHERE job_name = 'odds_refresh'
+              AND status IN ('OK', 'WARN')
+              AND started_at >= now() - make_interval(hours => :ttl_hours)
+            ORDER BY started_at DESC
+            LIMIT 1
+        """),
+        {"ttl_hours": _ODDS_REFRESH_TTL_HOURS},
+    )
+    last_run = recent.fetchone()
+    if last_run:
+        log.info("odds_refresh: skipping — last successful run was at %s (TTL %dh)", last_run[0], _ODDS_REFRESH_TTL_HOURS)
+        return {
+            "status": "WARN",
+            "job_name": "odds_refresh",
+            "records_processed": 0,
+            "message": f"fresh_data_ttl_not_expired — last run at {last_run[0].isoformat()}",
+        }
 
     from app.clients.odds_api_client import OddsApiClient
     import unicodedata as _ud
