@@ -64,6 +64,12 @@ class TournamentSlotResolver:
             matrix = FIFAAssignmentMatrix(self.conn)
             matrix_mapping = await matrix.resolve(competition_season_id, qualifying_groups)
 
+        # Fallback: compute assignment via constraint propagation when DB matrix is absent.
+        # Process slots in order of fewest candidates (most constrained first), so groups
+        # that appear in only one slot (e.g. group L → d_e_i_j_l) are assigned first.
+        if not matrix_mapping and qualifying_groups:
+            matrix_mapping = self._compute_best_third_assignment(slots, best_thirds)
+
         resolutions: list[SlotResolution] = []
         resolved_count = 0
         pending_count = 0
@@ -169,7 +175,16 @@ class TournamentSlotResolver:
                         source="best_thirds",
                     )
 
-            # Fall back to allowed_groups metadata
+            # If matrix_mapping covers this slot, the team wasn't available yet (PENDING)
+            if matrix_mapping and slot_code in matrix_mapping:
+                return SlotResolution(
+                    slot_id=slot_id, slot_code=slot_code, slot_label=slot_label,
+                    resolved_team_id=None, status=SLOT_STATUS_PENDING_BEST_THIRD,
+                    reason="matrix_group_not_yet_qualified",
+                    source="best_thirds",
+                )
+
+            # Last resort: greedy fallback via allowed_groups (only when no matrix at all)
             allowed_groups = slot.get("metadata", {}).get("allowed_groups", [])
             team = self._find_best_third(best_thirds, allowed_groups)
             if team is None:
@@ -217,6 +232,69 @@ class TournamentSlotResolver:
             resolved_team_id=None, status=SLOT_STATUS_PENDING,
             reason="no_resolution_criteria", source="unknown",
         )
+
+    def _compute_best_third_assignment(
+        self, slots: list[dict], best_thirds: list[dict]
+    ) -> dict[str, str]:
+        """
+        Compute best-third → slot assignment via constraint propagation + backtracking.
+
+        Returns {slot_code: group_letter}.
+
+        Algorithm: at each step, pick the slot with fewest remaining candidates
+        (most constrained first). Groups that appear in only one slot (e.g. L → d_e_i_j_l)
+        are forced first, which produces the unique correct assignment.
+        """
+        qualified_by_group: dict[str, dict] = {
+            t["group_code"].strip().upper(): t
+            for t in best_thirds
+            if t["qualification_status"] == "QUALIFIED_BEST_THIRD"
+        }
+        if not qualified_by_group:
+            return {}
+
+        best_third_slots = [s for s in slots if s.get("slot_type") == "BEST_THIRD"]
+
+        # slot_code → eligible groups (intersection of allowed and actually qualified)
+        slot_eligible: dict[str, set[str]] = {}
+        for s in best_third_slots:
+            allowed = {g.upper() for g in (s.get("metadata") or {}).get("allowed_groups", [])}
+            slot_eligible[s["slot_code"]] = allowed & set(qualified_by_group.keys())
+
+        assignment: dict[str, str] = {}
+        assigned_groups: set[str] = set()
+
+        # Index: group_letter → rank in best_thirds list (lower = better ranked)
+        group_rank = {
+            t["group_code"].strip().upper(): i
+            for i, t in enumerate(best_thirds)
+        }
+
+        def backtrack(remaining: list[str]) -> bool:
+            if not remaining:
+                return True
+            # Most constrained first
+            remaining.sort(key=lambda sc: len(slot_eligible[sc] - assigned_groups))
+            sc = remaining[0]
+            rest = remaining[1:]
+            candidates = sorted(
+                slot_eligible[sc] - assigned_groups,
+                key=lambda g: group_rank.get(g, 999),
+            )
+            if not candidates:
+                return False
+            for group in candidates:
+                assignment[sc] = group
+                assigned_groups.add(group)
+                if backtrack(list(rest)):
+                    return True
+                del assignment[sc]
+                assigned_groups.remove(group)
+            return False
+
+        backtrack(list(slot_eligible.keys()))
+        log.debug("best_third_assignment: %s", assignment)
+        return assignment
 
     def _find_by_group_rank(
         self, group_standings: dict[str, list[dict]], group_id: str, rank: int
