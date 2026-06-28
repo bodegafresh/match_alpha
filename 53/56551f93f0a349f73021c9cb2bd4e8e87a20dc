@@ -1,0 +1,22 @@
+gas/src/scheduler.gs
+  s_acedc47d393e24::t_038ee1dc424880 135-158
+  s_acedc47d393e24::t_2a7105388297ca 293-294
+  s_acedc47d393e24::t_217702d1ca7c8f 219-220,250-266,272-273,275,281-283
+  s_acedc47d393e24::t_5c5639cf952081 310-311
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "5356551f93f0a349f73021c9cb2bd4e8e87a20dc",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
