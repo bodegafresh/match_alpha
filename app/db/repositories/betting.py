@@ -6,7 +6,7 @@ from app.db.repositories.base import Repository
 
 class BettingRepository(Repository):
     async def eligible_prediction_odds(self) -> list[dict[str, Any]]:
-        """Returns prediction+odds candidates that don't yet have a betting decision."""
+        """Returns one candidate per prediction using the latest pre-kickoff odds snapshot."""
         return await self.fetch_all(
             """
             select
@@ -21,27 +21,27 @@ class BettingRepository(Repository):
               p.selection_id::text,
               p.line,
               m.kickoff_at,
-              os.odds_snapshot_id::text,
-              os.decimal_odds,
-              os.implied_probability,
-              os.captured_at,
+              latest_os.odds_snapshot_id::text,
+              latest_os.decimal_odds,
+              latest_os.implied_probability,
+              latest_os.captured_at,
               coalesce(cs_status.status::text, 'OBSERVATION') as competition_status
             from model_predictions p
             join matches m on m.match_id = p.match_id
-            join odds_snapshots os
-              on os.match_id = p.match_id
-             and os.market_id = p.market_id
-             and os.selection_id = p.selection_id
-             and coalesce(os.line, -999999) = coalesce(p.line, -999999)
+            join lateral (
+              select *
+              from odds_snapshots os
+              where os.match_id = p.match_id
+                and os.market_id = p.market_id
+                and os.selection_id = p.selection_id
+                and coalesce(os.line, -999999) = coalesce(p.line, -999999)
+                and os.captured_at < m.kickoff_at
+              order by os.captured_at desc
+              limit 1
+            ) latest_os on true
             left join competition_status cs_status
               on cs_status.competition_season_id = p.competition_season_id
             where (p.calibrated_probability is not null or p.raw_probability is not null)
-              and os.captured_at < m.kickoff_at
-              and not exists (
-                select 1 from betting_decisions bd
-                where bd.prediction_id = p.prediction_id
-                  and bd.odds_snapshot_id = os.odds_snapshot_id
-              )
             """,
         )
 
