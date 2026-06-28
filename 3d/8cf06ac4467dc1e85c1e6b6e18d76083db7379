@@ -1,0 +1,22 @@
+app/services/qualification/slot_resolver.py
+  s_acedc47d393e24::t_ca55a875ffd88e 417-418,441-444
+supabase/migrations/020_link_tournament_slots.sql
+  s_acedc47d393e24::t_5b5a9e9fd5f57c 1-90,105-112
+  s_acedc47d393e24::t_e661bc54aa8069 91-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "3d8cf06ac4467dc1e85c1e6b6e18d76083db7379",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
