@@ -96,8 +96,11 @@ function fetchTodayMatchTeams_(config) {
       muteHttpExceptions: true,
       headers: { 'Authorization': 'Bearer ' + config.API_INTERNAL_KEY }
     });
-    if (response.getResponseCode() !== 200) return [];
-    var body = JSON.parse(response.getContentText());
+    var code = response.getResponseCode();
+    var text = response.getContentText();
+    Logger.log('fetchTodayMatchTeams_ HTTP ' + code + ' body=' + text.slice(0, 500));
+    if (code !== 200) return [];
+    var body = JSON.parse(text);
     return (body.data && body.data.matches_news) ? body.data.matches_news : [];
   } catch (e) {
     Logger.log('fetchTodayMatchTeams_ error: ' + e.message);
