@@ -1,0 +1,19 @@
+app/services/qualification/slot_resolver.py
+  s_acedc47d393e24::t_76bdf581fd02ab 78-96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "0d15d9dfeb880e879701d1780f3215cac09c6bec",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
