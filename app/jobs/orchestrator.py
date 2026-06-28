@@ -73,7 +73,9 @@ class JobOrchestrator:
     async def live(self) -> dict[str, Any]:
         context = await self._build_context(live=True)
         plan = [
-            OrchestratedJob("worldcup_live_refresh", requires_upcoming_matches=True),
+            # Do not gate live refresh by "upcoming" matches: ESPN can still
+            # publish LIVE/FINAL transitions for matches that just started/ended.
+            OrchestratedJob("worldcup_live_refresh"),
             # odds_refresh is NOT in the live plan — The Odds API free tier is 500 req/month.
             # Running it every 5 min would consume ~8,640 req/month.
             # Odds are refreshed once per day by the daily plan instead.

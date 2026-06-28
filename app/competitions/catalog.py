@@ -405,7 +405,7 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
         source=SourceConfig(
             primary="SPORTMONKS",
             secondary=["FOOTBALL_DATA", "API_FOOTBALL", "ESPN"],
-            external_ids={"FOOTBALL_DATA": "CL"},
+            external_ids={"FOOTBALL_DATA": "CL", "API_FOOTBALL": "2"},
             capabilities={
                 "SPORTMONKS": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
                 "FOOTBALL_DATA": ["fixtures", "standings", "teams"],
@@ -467,6 +467,7 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
         source=SourceConfig(
             primary="API_FOOTBALL",
             secondary=["SPORTMONKS", "ESPN"],
+            external_ids={"API_FOOTBALL": "265"},
             capabilities={
                 "API_FOOTBALL": ["fixtures", "standings", "teams", "venues", "players", "events", "stats", "odds"],
                 "SPORTMONKS": ["fixtures", "standings", "teams", "venues", "players", "events", "stats"],
@@ -526,6 +527,11 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
             primary="API_FOOTBALL",
             secondary=["SPORTMONKS", "ESPN"],
             external_ids={"API_FOOTBALL": "31"},
+            capabilities={
+                "API_FOOTBALL": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "SPORTMONKS": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "ESPN": ["fixtures", "scores"],
+            },
         ),
         ui_navigation=["matches", "standings", "teams"],
         default_view="matches",
@@ -551,6 +557,12 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
             primary="FOOTBALL_DATA",
             secondary=["API_FOOTBALL", "SPORTMONKS", "ESPN"],
             external_ids={"FOOTBALL_DATA": "EC"},
+            capabilities={
+                "FOOTBALL_DATA": ["fixtures", "standings", "teams", "results"],
+                "API_FOOTBALL": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "SPORTMONKS": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "ESPN": ["fixtures", "scores"],
+            },
         ),
         ui_navigation=["matches", "standings", "teams"],
         default_view="standings",
@@ -577,6 +589,11 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
             primary="API_FOOTBALL",
             secondary=["ESPN", "SPORTMONKS"],
             external_ids={"API_FOOTBALL": "32"},
+            capabilities={
+                "API_FOOTBALL": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "SPORTMONKS": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "ESPN": ["fixtures", "scores"],
+            },
         ),
         ui_navigation=["matches", "standings", "teams"],
         default_view="standings",
@@ -603,6 +620,11 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
             primary="API_FOOTBALL",
             secondary=["SPORTMONKS", "ESPN"],
             external_ids={"API_FOOTBALL": "33"},
+            capabilities={
+                "API_FOOTBALL": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "SPORTMONKS": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "ESPN": ["fixtures", "scores"],
+            },
         ),
         ui_navigation=["matches", "standings", "teams"],
         default_view="standings",
@@ -632,6 +654,11 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
             primary="API_FOOTBALL",
             secondary=["SPORTMONKS", "ESPN"],
             external_ids={"API_FOOTBALL": "34"},
+            capabilities={
+                "API_FOOTBALL": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "SPORTMONKS": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "ESPN": ["fixtures", "scores"],
+            },
         ),
         ui_navigation=["matches", "standings", "teams"],
         default_view="standings",
@@ -658,6 +685,10 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
             primary="API_FOOTBALL",
             secondary=["ESPN"],
             external_ids={"API_FOOTBALL": "35"},
+            capabilities={
+                "API_FOOTBALL": ["fixtures", "standings", "teams", "venues", "players", "lineups", "events", "stats"],
+                "ESPN": ["fixtures", "scores"],
+            },
         ),
         ui_navigation=["matches", "standings", "teams"],
         default_view="standings",

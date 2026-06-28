@@ -28,8 +28,10 @@ var MATCH_ALPHA_CRON_CONFIG = {
   KEEPALIVE_ENABLED:        true,
   DAILY_JOB_ENABLED:        true,
   LIVE_JOB_ENABLED:         true,
+  MORNING_SUMMARY_ENABLED:  true,
   FETCH_TIMEOUT_MS:         25000,
   DAILY_HOUR_UTC:           10,   // hora UTC en que corre el daily (06:00 Chile = 10:00 UTC, UTC-4 invierno)
+  MORNING_SUMMARY_HOUR_UTC: 12,   // 08:00 Chile (UTC-4 invierno)
   // Ventana WC2026 para live orchestration
   WC_START_ISO:             '2026-06-11T00:00:00Z',
   WC_END_ISO:               '2026-07-20T00:00:00Z'
@@ -145,6 +147,39 @@ function runWeeklyTeamsSync() {
 }
 
 /**
+ * runMorningTelegramSummary — trigger diario a las 8:00 Chile.
+ * Envia a Telegram un resumen de la corrida daily previa, priorizando EV+.
+ */
+function runMorningTelegramSummary() {
+  var config = getBackendCronConfig_();
+  if (!config.MORNING_SUMMARY_ENABLED) {
+    return logBackendCronResult_('runMorningTelegramSummary', {
+      ok: false,
+      skipped: true,
+      reason: 'MORNING_SUMMARY_DISABLED'
+    });
+  }
+
+  var nowUtcHour = new Date().getUTCHours();
+  if (nowUtcHour !== config.MORNING_SUMMARY_HOUR_UTC) {
+    return logBackendCronResult_('runMorningTelegramSummary', {
+      ok: false,
+      skipped: true,
+      reason: 'WRONG_HOUR',
+      utc_hour: nowUtcHour
+    });
+  }
+
+  return logBackendCronResult_(
+    'runMorningTelegramSummary',
+    backendFetch_('/api/v1/jobs/telegram_daily_summary/run', {
+      method: 'post',
+      payload: { source: 'gas_morning_summary', ev_limit: 8 }
+    })
+  );
+}
+
+/**
  * checkBackendHealth — opcional, correr 1 vez al día para monitoreo.
  * Llama al nuevo endpoint /jobs/status/health introducido en el audit.
  */
@@ -243,21 +278,28 @@ function installMatchAlphaTriggers() {
     .inTimezone('UTC')
     .create();
 
+  var morningSummary = ScriptApp.newTrigger('runMorningTelegramSummary')
+    .timeBased()
+    .everyHours(1)
+    .create();
+
   var props = PropertiesService.getScriptProperties();
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'KEEPALIVE', keepalive.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'NEWS', news.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC', weekly.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'MORNING_SUMMARY', morningSummary.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM(orchestrated)');
+  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM(orchestrated) morning_summary=1h@12UTC');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
     news_trigger_id: news.getUniqueId(),
     daily_trigger_id: daily.getUniqueId(),
     live_trigger_id: live.getUniqueId(),
-    teams_sync_trigger_id: weekly.getUniqueId()
+    teams_sync_trigger_id: weekly.getUniqueId(),
+    morning_summary_trigger_id: morningSummary.getUniqueId()
   };
 }
 
@@ -268,6 +310,7 @@ function removeMatchAlphaTriggers() {
     runDailyBackendOrchestration: true,
     runLiveBackendOrchestration: true,
     runWeeklyTeamsSync: true,
+    runMorningTelegramSummary: true,
     checkBackendLatestStatus: true,
     checkBackendHealth: true
   };
@@ -284,6 +327,7 @@ function removeMatchAlphaTriggers() {
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC');
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'MORNING_SUMMARY');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC');
 
   return { ok: true, removed: true };

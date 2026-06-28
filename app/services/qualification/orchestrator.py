@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 async def run_qualification_resolver(
     conn: AsyncConnection,
     competition_season_id: str,
+    send_group_notifications: bool = True,
 ) -> QualificationResult:
     """
     Idempotent end-to-end qualification resolution for one competition season.
@@ -54,7 +55,12 @@ async def run_qualification_resolver(
 
         # Send Telegram notifications for fully-decided groups
         settings = get_settings()
-        if settings.telegram_bot_token and settings.telegram_chat_id and standings_result.get("groups_processed", 0) > 0:
+        if (
+            send_group_notifications
+            and settings.telegram_bot_token
+            and settings.telegram_chat_id
+            and standings_result.get("groups_processed", 0) > 0
+        ):
             for group_info in standings_result.get("decided_groups", []):
                 await notify_group_result(
                     settings.telegram_bot_token,

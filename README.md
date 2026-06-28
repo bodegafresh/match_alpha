@@ -31,6 +31,7 @@ python -m app.cli.run_job model_promotion
 python -m app.cli.run_job sync_all_leagues_teams
 python -m app.cli.run_job sync_all_leagues_players
 python -m app.cli.run_job validate_sync_coverage_all_leagues
+python -m app.cli.run_job telegram_daily_summary
 ```
 
 Los jobs HTTP usan:
@@ -53,7 +54,16 @@ curl -X POST "$API_URL/api/v1/jobs/orchestrate/weekly" \
   -H "Authorization: Bearer $API_INTERNAL_KEY" \
   -H "Content-Type: application/json" \
   -d '{"source":"manual_ops"}'
+
+curl -X POST "$API_URL/api/v1/jobs/telegram_daily_summary/run" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"manual_ops","ev_limit":8}'
 ```
+
+Telegram:
+- `qualification_resolver` no envia mensajes cuando corre dentro de `orchestrate/live`.
+- El resumen matinal (8:00 Chile) se envia con `telegram_daily_summary` y prioriza EV+ del ultimo daily.
 
 ## Operacion Semanal (Canonical)
 
