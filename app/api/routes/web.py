@@ -666,17 +666,16 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
         return {"ok": True, "data": {"matches_news": [], "generated_at": iso_utc()}}
 
     match_ids = [m["match_id"] for m in today_matches]
-    id_array = "{" + ",".join(match_ids) + "}"
 
     # AI context: matches that had AI adjustment applied
     ai_rows = await conn.execute(
         text("""
             SELECT DISTINCT mp.match_id::text
             FROM model_predictions mp
-            WHERE mp.match_id = ANY(cast(:ids as uuid[]))
+            WHERE mp.match_id = ANY(:ids)
               AND mp.explanation::text ILIKE '%ai_adjustment%'
         """),
-        {"ids": id_array},
+        {"ids": match_ids},
     )
     ai_adjusted_ids = {r[0] for r in ai_rows}
 
@@ -686,10 +685,10 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
             SELECT match_id::text, title, url, source,
                    pub_date, home_team, away_team
             FROM news_items
-            WHERE match_id = ANY(cast(:ids as uuid[]))
+            WHERE match_id = ANY(:ids)
             ORDER BY pub_date DESC NULLS LAST
         """),
-        {"ids": id_array},
+        {"ids": match_ids},
     )
     news_by_match: dict[str, list[dict]] = defaultdict(list)
     for r in news_rows:
