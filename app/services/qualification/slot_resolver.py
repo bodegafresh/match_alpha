@@ -75,6 +75,25 @@ class TournamentSlotResolver:
         pending_count = 0
 
         for slot in slots:
+            # Skip BEST_THIRD slots that are already resolved — the draw is final.
+            # Re-resolving them would overwrite the correct assignment with the
+            # greedy fallback whenever fewer than 8 thirds are in the DB.
+            if slot.get("slot_type") == "BEST_THIRD" and slot.get("resolved_team_id"):
+                log.debug("slot %s: already resolved, skipping", slot["slot_code"])
+                resolved_count += 1
+                resolutions.append(
+                    SlotResolution(
+                        slot_id=slot["tournament_slot_id"],
+                        slot_code=slot["slot_code"],
+                        slot_label=slot["slot_label"],
+                        resolved_team_id=slot["resolved_team_id"],
+                        status=SLOT_STATUS_RESOLVED,
+                        reason="ALREADY_RESOLVED",
+                        source="existing",
+                    )
+                )
+                continue
+
             resolution = self._resolve_slot(
                 slot, group_standings, best_thirds, knockout_results, matrix_mapping
             )
