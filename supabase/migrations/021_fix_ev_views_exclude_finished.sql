@@ -29,12 +29,21 @@ select distinct on (bd.match_id, p.market_id, p.selection_id)
   p.prediction_status,
   -- proxy confidence: feature_completeness from latest feature snapshot
   -- (null when model is RAW_ONLY and no snapshot exists)
-  coalesce(p.confidence_score,
-    (select fs.feature_completeness
-     from feature_snapshots fs
-     where fs.match_id = bd.match_id
-       and fs.feature_set_version = 'v1'
-     order by fs.as_of desc limit 1)
+  -- confidence_score debe ser decimal 0-1.
+  -- feature_completeness puede estar guardado como porcentaje (0-100) → dividir por 100 si > 1.
+  coalesce(
+    p.confidence_score,
+    nullif(
+      (select
+         case when fs.feature_completeness > 1
+              then fs.feature_completeness / 100.0
+              else fs.feature_completeness
+         end
+       from feature_snapshots fs
+       where fs.match_id = bd.match_id
+         and fs.feature_set_version = 'v1'
+       order by fs.as_of desc limit 1),
+      null)
   ) as confidence_score,
   p.explanation,
   os.decimal_odds,
