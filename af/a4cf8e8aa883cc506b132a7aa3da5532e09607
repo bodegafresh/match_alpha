@@ -1,0 +1,22 @@
+app/jobs/orchestrator.py
+  s_acedc47d393e24::t_cee4ba290fc985 77-79
+app/jobs/registry.py
+  s_acedc47d393e24::t_d4b67b294249d7 325-347
+  s_acedc47d393e24::t_b24e11f04cf861 303-305,318
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "afa4cf8e8aa883cc506b132a7aa3da5532e09607",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
