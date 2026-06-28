@@ -1,0 +1,124 @@
+-- Migration 021: Excluir partidos FINISHED/CANCELLED de las published views de EV
+--
+-- Las views publicadas de oportunidades EV mostraban partidos ya terminados
+-- porque no filtraban por match.status. Se agrega el filtro en ambas views.
+
+-- ─── published_ev_opportunities ───────────────────────────────────────────────
+
+drop view if exists published_ev_opportunities;
+create view published_ev_opportunities as
+select distinct on (bd.match_id, p.market_id, p.selection_id)
+  bd.betting_decision_id,
+  bd.competition_season_id,
+  bd.match_id,
+  bd.decision_status,
+  bd.risk_level,
+  bd.block_reason,
+  coalesce(bd.block_reasons, '[]'::jsonb) as block_reasons,
+  bd.edge,
+  bd.ev,
+  bd.kelly_fraction,
+  bd.stake_fraction,
+  bd.calibrated_probability_used  as model_probability,
+  bd.market_probability,
+  bd.decided_at,
+  m.market_code,
+  s.selection_code,
+  p.raw_probability,
+  p.calibrated_probability,
+  p.prediction_status,
+  -- proxy confidence: feature_completeness from latest feature snapshot
+  -- (null when model is RAW_ONLY and no snapshot exists)
+  coalesce(p.confidence_score,
+    (select fs.feature_completeness
+     from feature_snapshots fs
+     where fs.match_id = bd.match_id
+       and fs.feature_set_version = 'v1'
+     order by fs.as_of desc limit 1)
+  ) as confidence_score,
+  p.explanation,
+  os.decimal_odds,
+  os.implied_probability          as market_implied_probability,
+  os.captured_at                  as odds_captured_at,
+  extract(epoch from (now() - os.captured_at)) / 60 as odds_age_minutes,
+  match.kickoff_at,
+  match.status                    as match_status,
+  coalesce(home_team.display_name, home_slot.slot_label) as home_team_name,
+  home_team.country_code          as home_country_code,
+  home_country.flag_emoji         as home_flag_emoji,
+  home_slot.slot_label            as home_slot_label,
+  coalesce(away_team.display_name, away_slot.slot_label) as away_team_name,
+  away_team.country_code          as away_country_code,
+  away_country.flag_emoji         as away_flag_emoji,
+  away_slot.slot_label            as away_slot_label,
+  reg.model_name,
+  reg.model_version,
+  reg.model_family
+from betting_decisions bd
+join model_predictions p on p.prediction_id = bd.prediction_id
+join odds_snapshots os on os.odds_snapshot_id = bd.odds_snapshot_id
+join markets m on m.market_id = p.market_id
+join market_selections s on s.selection_id = p.selection_id
+join matches match on match.match_id = bd.match_id
+left join match_participants home_mp on home_mp.match_id = bd.match_id and home_mp.side = 'HOME'
+left join teams home_team on home_team.team_id = home_mp.team_id
+left join countries home_country on home_country.code_alpha2 = home_team.country_code
+left join tournament_slots home_slot on home_slot.tournament_slot_id = home_mp.tournament_slot_id
+left join match_participants away_mp on away_mp.match_id = bd.match_id and away_mp.side = 'AWAY'
+left join teams away_team on away_team.team_id = away_mp.team_id
+left join countries away_country on away_country.code_alpha2 = away_team.country_code
+left join tournament_slots away_slot on away_slot.tournament_slot_id = away_mp.tournament_slot_id
+join model_runs mr on mr.model_run_id = p.model_run_id
+join model_registry reg on reg.model_id = mr.model_id
+where bd.decision_status in ('BETTABLE', 'PAPER_ONLY')
+  and bd.ev > 0
+  and match.status not in ('FINISHED', 'CANCELLED', 'POSTPONED')
+  and match.kickoff_at > now()
+order by bd.match_id, p.market_id, p.selection_id, bd.decided_at desc;
+
+
+-- ─── published_blocked_decisions ──────────────────────────────────────────────
+
+drop view if exists published_blocked_decisions;
+create view published_blocked_decisions as
+select distinct on (bd.match_id, p.market_id, p.selection_id)
+  bd.betting_decision_id,
+  bd.competition_season_id,
+  bd.match_id,
+  bd.decision_status,
+  bd.risk_level,
+  bd.block_reason,
+  coalesce(bd.block_reasons, '[]'::jsonb) as block_reasons,
+  bd.edge,
+  bd.ev,
+  bd.decided_at,
+  m.market_code,
+  s.selection_code,
+  p.raw_probability,
+  p.calibrated_probability,
+  p.prediction_status,
+  p.confidence_score,
+  match.kickoff_at,
+  coalesce(home_team.display_name, home_slot.slot_label) as home_team_name,
+  home_country.flag_emoji         as home_flag_emoji,
+  home_slot.slot_label            as home_slot_label,
+  coalesce(away_team.display_name, away_slot.slot_label) as away_team_name,
+  away_country.flag_emoji         as away_flag_emoji,
+  away_slot.slot_label            as away_slot_label
+from betting_decisions bd
+join model_predictions p on p.prediction_id = bd.prediction_id
+join markets m on m.market_id = p.market_id
+join market_selections s on s.selection_id = p.selection_id
+join matches match on match.match_id = bd.match_id
+left join match_participants home_mp on home_mp.match_id = bd.match_id and home_mp.side = 'HOME'
+left join teams home_team on home_team.team_id = home_mp.team_id
+left join countries home_country on home_country.code_alpha2 = home_team.country_code
+left join tournament_slots home_slot on home_slot.tournament_slot_id = home_mp.tournament_slot_id
+left join match_participants away_mp on away_mp.match_id = bd.match_id and away_mp.side = 'AWAY'
+left join teams away_team on away_team.team_id = away_mp.team_id
+left join countries away_country on away_country.code_alpha2 = away_team.country_code
+left join tournament_slots away_slot on away_slot.tournament_slot_id = away_mp.tournament_slot_id
+where bd.decision_status = 'BLOCKED'
+  and match.status not in ('FINISHED', 'CANCELLED', 'POSTPONED')
+  and match.kickoff_at > now()
+order by bd.match_id, p.market_id, p.selection_id, bd.decided_at desc;
