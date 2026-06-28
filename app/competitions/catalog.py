@@ -180,6 +180,179 @@ def libertadores_stages() -> list[StageConfig]:
     ]
 
 
+def conmebol_wc2030_qualifier_stages() -> list[StageConfig]:
+    return [
+        StageConfig(
+            "LEAGUE_REGULAR",
+            "Eliminatorias",
+            1,
+            "LEAGUE_PHASE",
+            {
+                "view_type": "LEAGUE_TABLE",
+                "rounds": "DOUBLE_ROUND_ROBIN",
+                "teams": 10,
+                "tie_breakers": ["points", "goal_difference", "goals_for", "wins", "head_to_head"],
+                "qualification": {
+                    "direct_wc": 6,
+                    "intercontinental_playoff": 2,
+                    "eliminated": 2,
+                },
+            },
+        )
+    ]
+
+
+def uefa_wc2030_qualifier_stages() -> list[StageConfig]:
+    return [
+        StageConfig(
+            "GROUP_STAGE",
+            "Fase de grupos",
+            1,
+            "GROUP_STAGE",
+            {
+                "view_type": "GROUP_TABLES",
+                "teams_per_group": 5,
+                "group_count": 12,
+                "qualifies": {"top_n_per_group": 1, "runners_up_to_playoff": 12},
+                "tie_breakers": ["points", "goal_difference", "goals_for", "away_goals", "wins", "fair_play"],
+                "qualification": {
+                    "direct_wc": 12,
+                    "playoff_round": 12,
+                },
+            },
+        ),
+        StageConfig("PLAYOFF", "Playoffs", 2, "PLAYOFF", {**bracket_rules(6, legs=2), "legs": 2}),
+    ]
+
+
+def concacaf_wc2030_qualifier_stages() -> list[StageConfig]:
+    return [
+        StageConfig(
+            "GROUP_STAGE",
+            "Ronda de grupos",
+            1,
+            "GROUP_STAGE",
+            {
+                "view_type": "GROUP_TABLES",
+                "teams_per_group": 4,
+                "group_count": 3,
+                "tie_breakers": ["points", "goal_difference", "goals_for", "wins", "head_to_head"],
+                "qualification": {
+                    "direct_wc": 3,
+                    "runners_up_to_playoff": 3,
+                },
+            },
+        ),
+        StageConfig(
+            "FINAL_ROUND",
+            "Ronda final",
+            2,
+            "LEAGUE_PHASE",
+            {
+                "view_type": "LEAGUE_TABLE",
+                "rounds": "DOUBLE_ROUND_ROBIN",
+                "teams": 6,
+                "tie_breakers": ["points", "goal_difference", "goals_for", "wins", "head_to_head"],
+                "qualification": {
+                    "direct_wc": 3,
+                    "intercontinental_playoff": 2,
+                    "eliminated": 1,
+                },
+            },
+        ),
+    ]
+
+
+def caf_wc2030_qualifier_stages() -> list[StageConfig]:
+    return [
+        StageConfig(
+            "GROUP_STAGE",
+            "Fase de grupos",
+            1,
+            "GROUP_STAGE",
+            {
+                "view_type": "GROUP_TABLES",
+                "teams_per_group": 5,
+                "group_count": 9,
+                "tie_breakers": ["points", "goal_difference", "goals_for", "away_goals", "wins", "fair_play"],
+                "qualification": {"top_n_per_group": 1},
+            },
+        ),
+        StageConfig("PLAYOFF", "Playoffs finales", 2, "PLAYOFF", {**bracket_rules(4, legs=2), "legs": 2}),
+    ]
+
+
+def afc_wc2030_qualifier_stages() -> list[StageConfig]:
+    return [
+        StageConfig(
+            "GROUP_STAGE",
+            "Ronda 3",
+            1,
+            "GROUP_STAGE",
+            {
+                "view_type": "GROUP_TABLES",
+                "teams_per_group": 6,
+                "group_count": 3,
+                "tie_breakers": ["points", "goal_difference", "goals_for", "wins", "head_to_head", "fair_play"],
+                "qualification": {
+                    "top_n_per_group": 2,
+                    "runners_up_to_playoff": 6,
+                },
+            },
+        ),
+        StageConfig(
+            "PLAYOFF",
+            "Ronda 4",
+            2,
+            "PLAYOFF",
+            {
+                "view_type": "GROUP_TABLES",
+                "teams_per_group": 3,
+                "group_count": 2,
+                "tie_breakers": ["points", "goal_difference", "goals_for"],
+                "qualification": {
+                    "top_n_per_group": 1,
+                    "intercontinental_playoff": 2,
+                },
+            },
+        ),
+    ]
+
+
+def ofc_wc2030_qualifier_stages() -> list[StageConfig]:
+    return [
+        StageConfig(
+            "GROUP_STAGE",
+            "Fase de grupos",
+            1,
+            "GROUP_STAGE",
+            {
+                "view_type": "GROUP_TABLES",
+                "teams_per_group": 4,
+                "group_count": 2,
+                "tie_breakers": ["points", "goal_difference", "goals_for"],
+                "qualification": {"top_n_per_group": 2},
+            },
+        ),
+        StageConfig(
+            "FINAL_ROUND",
+            "Ronda final",
+            2,
+            "LEAGUE_PHASE",
+            {
+                "view_type": "LEAGUE_TABLE",
+                "rounds": "SINGLE_ROUND_ROBIN",
+                "teams": 4,
+                "tie_breakers": ["points", "goal_difference", "goals_for"],
+                "qualification": {
+                    "direct_wc": 1,
+                    "intercontinental_playoff": 1,
+                },
+            },
+        ),
+    ]
+
+
 COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
     "wc2026": CompetitionCatalogEntry(
         slug="wc2026",
@@ -332,6 +505,164 @@ COMPETITION_CATALOG: dict[str, CompetitionCatalogEntry] = {
         ui_navigation=["matches", "standings", "teams", "bracket"],
         default_view="matches",
         stages=libertadores_stages(),
+    ),
+    "conmebol-qualifiers-wc2030": CompetitionCatalogEntry(
+        slug="conmebol-qualifiers-wc2030",
+        competition_slug="conmebol-world-cup-qualifiers",
+        name="Eliminatorias Sudamericanas 2030",
+        competition_type="TOURNAMENT",
+        domain_type="INTERNATIONAL_CUP",
+        format_code="SINGLE_TABLE_LEAGUE",
+        season_label="2026-2029",
+        country_code=None,
+        region="South America",
+        confederation="CONMEBOL",
+        tier=1,
+        is_international=True,
+        starts_at="2026-09-04T00:00:00Z",
+        ends_at="2029-11-20T23:59:59Z",
+        timezone_name="UTC",
+        source=SourceConfig(
+            primary="API_FOOTBALL",
+            secondary=["SPORTMONKS", "ESPN"],
+            external_ids={"API_FOOTBALL": "31"},
+        ),
+        ui_navigation=["matches", "standings", "teams"],
+        default_view="matches",
+        stages=conmebol_wc2030_qualifier_stages(),
+    ),
+    "uefa-qualifiers-wc2030": CompetitionCatalogEntry(
+        slug="uefa-qualifiers-wc2030",
+        competition_slug="uefa-world-cup-qualifiers",
+        name="Clasificación Europea 2030",
+        competition_type="TOURNAMENT",
+        domain_type="INTERNATIONAL_CUP",
+        format_code="GROUPS_THEN_KNOCKOUT",
+        season_label="2026-2029",
+        country_code=None,
+        region="Europe",
+        confederation="UEFA",
+        tier=1,
+        is_international=True,
+        starts_at="2026-09-04T00:00:00Z",
+        ends_at="2029-11-18T23:59:59Z",
+        timezone_name="UTC",
+        source=SourceConfig(
+            primary="FOOTBALL_DATA",
+            secondary=["API_FOOTBALL", "SPORTMONKS", "ESPN"],
+            external_ids={"FOOTBALL_DATA": "EC"},
+        ),
+        ui_navigation=["matches", "standings", "teams"],
+        default_view="standings",
+        stages=uefa_wc2030_qualifier_stages(),
+        groups=groups_a_to_l(),
+    ),
+    "concacaf-qualifiers-wc2030": CompetitionCatalogEntry(
+        slug="concacaf-qualifiers-wc2030",
+        competition_slug="concacaf-world-cup-qualifiers",
+        name="Clasificación CONCACAF 2030",
+        competition_type="TOURNAMENT",
+        domain_type="INTERNATIONAL_CUP",
+        format_code="GROUPS_THEN_KNOCKOUT",
+        season_label="2026-2029",
+        country_code=None,
+        region="North & Central America",
+        confederation="CONCACAF",
+        tier=1,
+        is_international=True,
+        starts_at="2026-09-04T00:00:00Z",
+        ends_at="2029-11-18T23:59:59Z",
+        timezone_name="UTC",
+        source=SourceConfig(
+            primary="API_FOOTBALL",
+            secondary=["ESPN", "SPORTMONKS"],
+            external_ids={"API_FOOTBALL": "32"},
+        ),
+        ui_navigation=["matches", "standings", "teams"],
+        default_view="standings",
+        stages=concacaf_wc2030_qualifier_stages(),
+        groups=[GroupConfig("A", "Grupo A", 1), GroupConfig("B", "Grupo B", 2), GroupConfig("C", "Grupo C", 3)],
+    ),
+    "caf-qualifiers-wc2030": CompetitionCatalogEntry(
+        slug="caf-qualifiers-wc2030",
+        competition_slug="caf-world-cup-qualifiers",
+        name="Clasificación Africana 2030",
+        competition_type="TOURNAMENT",
+        domain_type="INTERNATIONAL_CUP",
+        format_code="GROUPS_THEN_KNOCKOUT",
+        season_label="2026-2029",
+        country_code=None,
+        region="Africa",
+        confederation="CAF",
+        tier=1,
+        is_international=True,
+        starts_at="2026-09-04T00:00:00Z",
+        ends_at="2029-11-18T23:59:59Z",
+        timezone_name="UTC",
+        source=SourceConfig(
+            primary="API_FOOTBALL",
+            secondary=["SPORTMONKS", "ESPN"],
+            external_ids={"API_FOOTBALL": "33"},
+        ),
+        ui_navigation=["matches", "standings", "teams"],
+        default_view="standings",
+        stages=caf_wc2030_qualifier_stages(),
+        groups=[
+            GroupConfig(letter, f"Grupo {letter}", i + 1)
+            for i, letter in enumerate("ABCDEFGHI")
+        ],
+    ),
+    "afc-qualifiers-wc2030": CompetitionCatalogEntry(
+        slug="afc-qualifiers-wc2030",
+        competition_slug="afc-world-cup-qualifiers",
+        name="Clasificación Asiática 2030",
+        competition_type="TOURNAMENT",
+        domain_type="INTERNATIONAL_CUP",
+        format_code="GROUPS_THEN_KNOCKOUT",
+        season_label="2026-2029",
+        country_code=None,
+        region="Asia",
+        confederation="AFC",
+        tier=1,
+        is_international=True,
+        starts_at="2027-10-07T00:00:00Z",
+        ends_at="2029-11-18T23:59:59Z",
+        timezone_name="UTC",
+        source=SourceConfig(
+            primary="API_FOOTBALL",
+            secondary=["SPORTMONKS", "ESPN"],
+            external_ids={"API_FOOTBALL": "34"},
+        ),
+        ui_navigation=["matches", "standings", "teams"],
+        default_view="standings",
+        stages=afc_wc2030_qualifier_stages(),
+        groups=[GroupConfig("A", "Grupo A", 1), GroupConfig("B", "Grupo B", 2), GroupConfig("C", "Grupo C", 3)],
+    ),
+    "ofc-qualifiers-wc2030": CompetitionCatalogEntry(
+        slug="ofc-qualifiers-wc2030",
+        competition_slug="ofc-world-cup-qualifiers",
+        name="Clasificación OFC 2030",
+        competition_type="TOURNAMENT",
+        domain_type="INTERNATIONAL_CUP",
+        format_code="GROUPS_THEN_KNOCKOUT",
+        season_label="2026-2029",
+        country_code=None,
+        region="Oceania",
+        confederation="OFC",
+        tier=1,
+        is_international=True,
+        starts_at="2027-06-01T00:00:00Z",
+        ends_at="2029-09-30T23:59:59Z",
+        timezone_name="UTC",
+        source=SourceConfig(
+            primary="API_FOOTBALL",
+            secondary=["ESPN"],
+            external_ids={"API_FOOTBALL": "35"},
+        ),
+        ui_navigation=["matches", "standings", "teams"],
+        default_view="standings",
+        stages=ofc_wc2030_qualifier_stages(),
+        groups=[GroupConfig("A", "Grupo A", 1), GroupConfig("B", "Grupo B", 2)],
     ),
 }
 
