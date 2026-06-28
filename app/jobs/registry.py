@@ -16,6 +16,7 @@ from app.competitions.service import (
     worldcup_daily_refresh,
     worldcup_live_refresh,
 )
+from app.competitions.team_sync import sync_players_for_all_leagues, sync_teams_for_all_leagues
 from app.db.repositories.betting import BettingRepository
 from app.db.repositories.observability import ObservabilityRepository
 from app.decision.decision_engine import evaluate_decision
@@ -878,6 +879,24 @@ async def qualification_resolver_job(conn: AsyncConnection, payload: dict[str, A
     }
 
 
+async def sync_all_leagues_teams_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Weekly: upsert teams for all catalog entries that have API_FOOTBALL external_ids."""
+    _ = payload
+    return await sync_teams_for_all_leagues(conn)
+
+
+async def sync_all_leagues_players_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Weekly: upsert players + squad memberships for all catalog entries with API_FOOTBALL."""
+    _ = payload
+    return await sync_players_for_all_leagues(conn)
+
+
+async def sync_all_leagues_fixtures_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Daily: sync fixtures for all catalog entries (multi-league complement to worldcup_daily_refresh)."""
+    competition = payload.get("competition")
+    return await sync_competition_fixtures(conn, competition)
+
+
 async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     jobs: dict[str, JobFn] = {
@@ -903,6 +922,10 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "drift_detection_full": drift_detection_full_job,
         "model_promotion": model_promotion_job,
         "backtest_walk_forward": backtest_job,
+        # Multi-league sync
+        "sync_all_leagues_teams": sync_all_leagues_teams_job,
+        "sync_all_leagues_players": sync_all_leagues_players_job,
+        "sync_all_leagues_fixtures": sync_all_leagues_fixtures_job,
     }
     scaffold_jobs = {
         "dataset_builder",

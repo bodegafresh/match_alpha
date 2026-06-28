@@ -53,3 +53,12 @@ class ApiFootballClient(HttpClient):
 
     async def teams(self, league: str | int, season: str | int) -> dict[str, Any]:
         return await self.get("teams", params={"league": league, "season": season})
+
+    async def players_squad(self, team: int) -> dict[str, Any]:
+        return await self.get("players/squads", params={"team": team})
+
+    async def players(self, league: int, season: int, page: int = 1) -> dict[str, Any]:
+        return await self.get("players", params={"league": league, "season": season, "page": page})
+
+    async def injuries(self, league: int, season: int) -> dict[str, Any]:
+        return await self.get("injuries", params={"league": league, "season": season})

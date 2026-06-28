@@ -51,6 +51,7 @@ class JobOrchestrator:
         context = await self._build_context()
         plan = [
             OrchestratedJob("worldcup_daily_refresh", critical=True),
+            OrchestratedJob("sync_all_leagues_fixtures"),   # multi-league fixture sync
             OrchestratedJob("standings_refresh"),
             OrchestratedJob("qualification_resolver"),
             OrchestratedJob("odds_refresh", requires_upcoming_matches=True),
@@ -66,7 +67,6 @@ class JobOrchestrator:
             # Phase 3 — triggered manually / CI only (NOT in daily auto-plan):
             # OrchestratedJob("model_promotion")    → payload: {auto_promote: true}
             # OrchestratedJob("backtest_walk_forward")
-
         ]
         return await self._run_plan("daily", plan, context)
 
@@ -246,7 +246,8 @@ class JobOrchestrator:
     async def _build_context(self, live: bool = False) -> dict[str, Any]:
         await self._database_ping()
         # For live: narrow window [-2h, +6h]. For daily: wider window [-2h, +72h].
-        # Scoped to the default competition season to avoid false positives from other competitions.
+        # Checks across ALL active competition_seasons so multi-league jobs are not
+        # skipped when only secondary leagues have matches in the window.
         lookahead_hours = 6 if live else self.settings.odds_refresh_window_hours
         row = await self.conn.execute(
             text(
@@ -255,14 +256,14 @@ class JobOrchestrator:
                   exists(
                     select 1 from matches m
                     join competition_seasons cs on cs.competition_season_id = m.competition_season_id
-                    where cs.slug = :season
+                    where cs.status in ('ACTIVE', 'SCHEDULED')
                       and m.kickoff_at >= now() - interval '2 hours'
                       and m.kickoff_at <= now() + make_interval(hours => :lookahead_hours)
                   ) as has_upcoming_matches,
                   exists(
                     select 1 from matches m
                     join competition_seasons cs on cs.competition_season_id = m.competition_season_id
-                    where cs.slug = :season
+                    where cs.status in ('ACTIVE', 'SCHEDULED')
                       and m.status = 'FINISHED'
                       and m.kickoff_at >= now() - interval '2 days'
                   ) as has_finished_matches,
@@ -270,22 +271,19 @@ class JobOrchestrator:
                     select 1 from model_predictions mp
                     join matches m on m.match_id = mp.match_id
                     join competition_seasons cs on cs.competition_season_id = mp.competition_season_id
-                    where cs.slug = :season
+                    where cs.status in ('ACTIVE', 'SCHEDULED')
                       and mp.as_of >= now() - interval '7 days'
                   ) as has_predictions,
                   exists(
                     select 1 from odds_snapshots os
                     join matches m on m.match_id = os.match_id
                     join competition_seasons cs on cs.competition_season_id = m.competition_season_id
-                    where cs.slug = :season
+                    where cs.status in ('ACTIVE', 'SCHEDULED')
                       and os.captured_at >= now() - interval '24 hours'
                   ) as has_odds
                 """
             ),
-            {
-                "season": self.settings.default_season_slug,
-                "lookahead_hours": lookahead_hours,
-            },
+            {"lookahead_hours": lookahead_hours},
         )
         data = dict(row.first()._mapping)
         data["live"] = live
