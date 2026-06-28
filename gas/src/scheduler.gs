@@ -29,7 +29,7 @@ var MATCH_ALPHA_CRON_CONFIG = {
   DAILY_JOB_ENABLED:        true,
   LIVE_JOB_ENABLED:         true,
   FETCH_TIMEOUT_MS:         25000,
-  DAILY_HOUR_UTC:           6,    // hora UTC en que corre el daily (06:00)
+  DAILY_HOUR_UTC:           10,   // hora UTC en que corre el daily (06:00 Chile = 10:00 UTC, UTC-4 invierno)
   // Ventana WC2026 para live orchestration
   WC_START_ISO:             '2026-06-11T00:00:00Z',
   WC_END_ISO:               '2026-07-20T00:00:00Z'
