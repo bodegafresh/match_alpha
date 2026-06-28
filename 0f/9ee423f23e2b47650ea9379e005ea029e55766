@@ -1,0 +1,25 @@
+app/services/qualification/slot_resolver.py
+  s_acedc47d393e24::t_e383511fe9bd76 178-187
+  s_acedc47d393e24::t_d84d1fdbe9b174 236-298
+  s_acedc47d393e24::t_37457d5a8dcd49 67-72
+supabase/migrations/020b_fix_best_third_allowed_groups.sql
+  s_acedc47d393e24::t_2128ecbb575b2b 1-72
+supabase/migrations/020c_reset_best_third_slots.sql
+  s_acedc47d393e24::t_09748dbb9d3bc5 1-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "0f9ee423f23e2b47650ea9379e005ea029e55766",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
