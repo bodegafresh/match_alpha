@@ -1,0 +1,19 @@
+app/api/routes/web.py
+  s_acedc47d393e24::t_e6502c4905043f 592-595,598-608,610,616-617,622,628
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "06fc014dac0d29a91feab8e96d5eb3e3312ea796",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
