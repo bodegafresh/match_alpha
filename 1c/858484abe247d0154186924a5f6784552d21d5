@@ -1,0 +1,36 @@
+app/competitions/team_sync.py
+  s_5464458db59e8d::t_69c76e5ae913de 19,87-93,95-97,269,271-273,280,285-291,293-295,521
+  s_5464458db59e8d::t_ab81aa83c845f0 25-27,44-83,103-104,106-109,112-113,118,124,133-147,150,158,161,174,190,193,195-206,213,223-228,301-302,304-307,310-311,316,319,324,334,337-339,348-355,360,376,396,399-404,406-415,420,424,438,452,459
+  s_5464458db59e8d::t_83c47be082bc04 529-666
+app/api/routes/jobs.py
+  s_5464458db59e8d::t_f81875fd8720b1 40-47
+README.md
+  s_5464458db59e8d::t_2e5f0fd73feba4 31-33,43-77
+app/jobs/registry.py
+  s_5464458db59e8d::t_fe1871720fa0a0 19-23,931-936,966
+app/clients/base.py
+  s_5464458db59e8d::t_5e33770ae2efde 38-40
+gas/src/scheduler.gs
+  s_5464458db59e8d::t_b55edbe761f5ad 137-138,239,251,253,260
+  s_5464458db59e8d::t_871b4550468801 143,207,237-238
+app/jobs/orchestrator.py
+  s_5464458db59e8d::t_2baa37b0d2f499 85-94
+supabase/diagnostics/diag_sync_teams_players_by_league.sql
+  s_5464458db59e8d::t_8e3b61c388c900 1-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "1c858484abe247d0154186924a5f6784552d21d5",
+  "prompts": {},
+  "sessions": {
+    "s_5464458db59e8d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "07c90802-5b7f-4a48-9c11-612e4c1d71c7",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
