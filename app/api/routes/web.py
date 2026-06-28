@@ -264,19 +264,74 @@ import json as _json_mod
 # read from DB instead of calling the external API.
 _WEATHER_CACHE_TTL_HOURS = 3
 # Only enrich matches that kick off within this window (no point fetching
-# weather for a match that is 7 days away).
+# weather for a match that is 7 days away).  WeatherAPI free tier supports
+# forecasts up to 3 days ahead.
 _WEATHER_LOOKAHEAD_HOURS = 48
 
 
-async def _fetch_weather_for_city(city: str | None, country: str | None) -> dict:
-    """Fetch current weather from WeatherAPI. Returns {} if no key or city."""
+async def _fetch_weather_for_match(
+    city: str | None,
+    country: str | None,
+    kickoff_at: str | None,
+) -> dict:
+    """Fetch forecast weather at match kickoff time from WeatherAPI.
+
+    Uses forecast.json (not current.json) so the temperature/rain/wind
+    returned reflects conditions at the actual kickoff hour, not now.
+    Falls back to current.json if kickoff is in the past or unparseable.
+    """
     settings = get_settings()
     if not settings.weather_api_key or not city:
         return {}
     import httpx
+
+    location = f"{city},{country or ''}".strip(",")
+
+    # Determine kickoff date and hour for the forecast query
+    kickoff_dt: datetime | None = None
+    if kickoff_at:
+        try:
+            kickoff_dt = datetime.fromisoformat(str(kickoff_at).replace("Z", "+00:00"))
+        except Exception:
+            pass
+
     try:
-        location = f"{city},{country or ''}".strip(",")
         async with httpx.AsyncClient(timeout=5) as client:
+            if kickoff_dt and kickoff_dt > datetime.now(UTC):
+                # Use forecast endpoint — returns hourly data up to 3 days ahead
+                r = await client.get(
+                    "https://api.weatherapi.com/v1/forecast.json",
+                    params={
+                        "key": settings.weather_api_key,
+                        "q": location,
+                        "dt": kickoff_dt.strftime("%Y-%m-%d"),
+                        "aqi": "no",
+                        "alerts": "no",
+                    },
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    # Extract the hourly slot closest to kickoff
+                    forecast_day = (data.get("forecast", {}).get("forecastday") or [{}])[0]
+                    hours = forecast_day.get("hour") or []
+                    kickoff_hour = kickoff_dt.hour
+                    # Pick exact hour or nearest available
+                    hour_data = next(
+                        (h for h in hours if datetime.fromisoformat(h["time"]).hour == kickoff_hour),
+                        hours[kickoff_hour] if hours and kickoff_hour < len(hours) else (hours[-1] if hours else {}),
+                    )
+                    return {
+                        "temperature_c": hour_data.get("temp_c"),
+                        "condition": hour_data.get("condition", {}).get("text"),
+                        "wind_kph": hour_data.get("wind_kph"),
+                        "humidity_pct": hour_data.get("humidity"),
+                        "precip_mm": hour_data.get("precip_mm"),
+                        "chance_of_rain": hour_data.get("chance_of_rain"),
+                        "kickoff_at": kickoff_at,
+                        "forecast_type": "kickoff_hour",
+                        "fetched_at": iso_utc(),
+                    }
+            # Fallback: current conditions (match already started or kickoff unparseable)
             r = await client.get(
                 "https://api.weatherapi.com/v1/current.json",
                 params={"key": settings.weather_api_key, "q": location, "aqi": "no"},
@@ -288,6 +343,8 @@ async def _fetch_weather_for_city(city: str | None, country: str | None) -> dict
                     "condition": current.get("condition", {}).get("text"),
                     "wind_kph": current.get("wind_kph"),
                     "humidity_pct": current.get("humidity"),
+                    "precip_mm": current.get("precip_mm"),
+                    "forecast_type": "current",
                     "fetched_at": iso_utc(),
                 }
     except Exception:
@@ -373,9 +430,10 @@ async def _enrich_weather(
         return matches
 
     results = await asyncio.gather(*[
-        _fetch_weather_for_city(
+        _fetch_weather_for_match(
             m["venue"]["city"],
             m["venue"].get("country_code"),
+            m.get("kickoff_at"),
         )
         for m in needs_weather
     ], return_exceptions=True)

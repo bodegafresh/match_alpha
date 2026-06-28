@@ -147,26 +147,112 @@ async def _fetch_feature_context(conn: AsyncConnection, match_id: str) -> dict:
     return result
 
 
-async def _fetch_weather(venue_city: str | None, venue_country: str | None) -> dict:
+async def _fetch_weather(
+    conn: AsyncConnection,
+    match_id: str,
+    venue_city: str | None,
+    venue_country: str | None,
+    kickoff_at: Any,
+) -> dict:
+    """Return forecast weather at kickoff time.
+
+    Priority order:
+    1. Read from matches.metadata.weather (persisted by the web layer).
+    2. If stale or missing, call WeatherAPI forecast.json for the kickoff date/hour.
+
+    This avoids duplicate API calls and always returns conditions for kickoff time,
+    not current conditions.
+    """
+    from datetime import UTC, datetime
+
+    # --- 1. Try reading from persisted match metadata ---
+    try:
+        row = await conn.execute(
+            text("SELECT metadata FROM matches WHERE match_id = cast(:mid as uuid)"),
+            {"mid": match_id},
+        )
+        r = row.fetchone()
+        if r:
+            meta = r[0] or {}
+            cached = meta.get("weather") if isinstance(meta, dict) else None
+            if cached and isinstance(cached, dict) and cached.get("fetched_at"):
+                try:
+                    fetched_at = datetime.fromisoformat(cached["fetched_at"].replace("Z", "+00:00"))
+                    age_h = (datetime.now(UTC) - fetched_at).total_seconds() / 3600
+                    if age_h < 3:
+                        # Already fresh — normalize keys for AI prompt compatibility
+                        return {
+                            "temp_c": cached.get("temperature_c") or cached.get("temp_c"),
+                            "condition": cached.get("condition"),
+                            "wind_kph": cached.get("wind_kph"),
+                            "precip_mm": cached.get("precip_mm"),
+                            "humidity": cached.get("humidity_pct") or cached.get("humidity"),
+                            "chance_of_rain": cached.get("chance_of_rain"),
+                            "forecast_type": cached.get("forecast_type", "cached"),
+                        }
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.debug("weather db read failed: %s", exc)
+
+    # --- 2. Fetch from WeatherAPI using forecast.json for the kickoff hour ---
     settings = get_settings()
     if not settings.weather_api_key or not venue_city:
         return {}
+
+    kickoff_dt: datetime | None = None
+    if kickoff_at:
+        try:
+            kickoff_dt = datetime.fromisoformat(str(kickoff_at).replace("Z", "+00:00"))
+        except Exception:
+            pass
+
+    location = f"{venue_city},{venue_country or ''}".strip(",")
     try:
-        location = f"{venue_city},{venue_country or ''}".strip(",")
         async with httpx.AsyncClient(timeout=8) as client:
+            if kickoff_dt and kickoff_dt > datetime.now(UTC):
+                r = await client.get(
+                    "https://api.weatherapi.com/v1/forecast.json",
+                    params={
+                        "key": settings.weather_api_key,
+                        "q": location,
+                        "dt": kickoff_dt.strftime("%Y-%m-%d"),
+                        "aqi": "no",
+                        "alerts": "no",
+                    },
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    forecast_day = (data.get("forecast", {}).get("forecastday") or [{}])[0]
+                    hours = forecast_day.get("hour") or []
+                    kickoff_hour = kickoff_dt.hour
+                    hour_data = next(
+                        (h for h in hours if datetime.fromisoformat(h["time"]).hour == kickoff_hour),
+                        hours[kickoff_hour] if hours and kickoff_hour < len(hours) else (hours[-1] if hours else {}),
+                    )
+                    return {
+                        "temp_c": hour_data.get("temp_c"),
+                        "condition": hour_data.get("condition", {}).get("text"),
+                        "wind_kph": hour_data.get("wind_kph"),
+                        "precip_mm": hour_data.get("precip_mm"),
+                        "humidity": hour_data.get("humidity"),
+                        "chance_of_rain": hour_data.get("chance_of_rain"),
+                        "forecast_type": "kickoff_hour",
+                    }
+            # Fallback: current conditions (match in progress or today)
             r = await client.get(
                 "https://api.weatherapi.com/v1/current.json",
                 params={"key": settings.weather_api_key, "q": location, "aqi": "no"},
             )
             if r.status_code == 200:
-                data = r.json()
-                current = data.get("current", {})
+                current = r.json().get("current", {})
                 return {
                     "temp_c": current.get("temp_c"),
                     "condition": current.get("condition", {}).get("text"),
                     "wind_kph": current.get("wind_kph"),
                     "precip_mm": current.get("precip_mm"),
                     "humidity": current.get("humidity"),
+                    "forecast_type": "current",
                 }
     except Exception as exc:
         log.debug("weather fetch failed: %s", exc)
@@ -482,7 +568,7 @@ async def adjust_predictions_with_ai(
     except Exception as exc:
         log.debug("context fetch partial failure: %s", exc)
 
-    weather = await _fetch_weather(match.get("venue_city"), match.get("venue_country"))
+    weather = await _fetch_weather(conn, match_id, match.get("venue_city"), match.get("venue_country"), match.get("kickoff_at"))
     news = await _fetch_news(conn, match_id)
 
     messages = _build_prompt(match, raw_probs, odds, standings, features, weather, news)
