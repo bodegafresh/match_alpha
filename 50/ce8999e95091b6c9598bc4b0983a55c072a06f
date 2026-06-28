@@ -1,0 +1,27 @@
+supabase/diagnostics/diag_v2_standings_and_thirds.sql
+  s_acedc47d393e24::t_d6cea30424126d 1-145
+supabase/migrations/022_best_third_draw_matrix.sql
+  s_acedc47d393e24::t_a5aeae75162d71 1-40
+supabase/diagnostics/diag_slot_and_confidence.sql
+  s_acedc47d393e24::t_1d59b40d15900e 1-146
+supabase/migrations/021_fix_ev_views_exclude_finished.sql
+  s_acedc47d393e24::t_185ee787ce4d8b 32-46
+supabase/migrations/023_reset_and_fix_best_third_slots.sql
+  s_acedc47d393e24::t_ebe785b4ae0ea2 1-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "50ce8999e95091b6c9598bc4b0983a55c072a06f",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
