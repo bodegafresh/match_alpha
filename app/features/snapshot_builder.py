@@ -310,11 +310,20 @@ async def get_matches_needing_snapshots(
             WHERE m.kickoff_at BETWEEN now() - make_interval(days => :days_behind)
                                     AND now() + make_interval(days => :days_ahead)
               AND m.status IN ('SCHEDULED', 'LIVE', 'FINISHED')
-              AND NOT EXISTS (
-                SELECT 1 FROM feature_snapshots fs
-                WHERE fs.match_id = m.match_id
-                  AND fs.feature_set_version = :version
-                  AND fs.team_side IS NOT NULL
+              AND NOT (
+                EXISTS (
+                  SELECT 1 FROM feature_snapshots fs
+                  WHERE fs.match_id = m.match_id
+                    AND fs.feature_set_version = :version
+                    AND fs.team_side = 'HOME'
+                )
+                AND
+                EXISTS (
+                  SELECT 1 FROM feature_snapshots fs
+                  WHERE fs.match_id = m.match_id
+                    AND fs.feature_set_version = :version
+                    AND fs.team_side = 'AWAY'
+                )
               )
             ORDER BY m.kickoff_at ASC
         """),

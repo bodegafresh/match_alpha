@@ -214,7 +214,13 @@ async def model_recompute_job(conn: AsyncConnection, payload: dict[str, Any]) ->
               AND m.kickoff_at BETWEEN now() AND now() + interval '14 days'
               AND EXISTS (
                 SELECT 1 FROM feature_snapshots fs
-                WHERE fs.match_id = m.match_id AND fs.team_side IS NOT NULL
+                WHERE fs.match_id = m.match_id AND fs.team_side = 'HOME'
+                  AND fs.feature_set_version = 'v1'
+              )
+              AND EXISTS (
+                SELECT 1 FROM feature_snapshots fs
+                WHERE fs.match_id = m.match_id AND fs.team_side = 'AWAY'
+                  AND fs.feature_set_version = 'v1'
               )
               AND NOT EXISTS (
                 SELECT 1 FROM model_predictions mp
