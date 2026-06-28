@@ -560,7 +560,7 @@ async def news_ingest(
     """Receive news items from GAS and upsert into news_items table.
     Authenticated with X-Internal-Key header."""
     settings = get_settings()
-    if x_internal_key != settings.internal_job_key:
+    if x_internal_key != settings.api_internal_key:
         raise HTTPException(status_code=401, detail="Invalid internal key")
     if not items:
         return {"ok": True, "inserted": 0}
