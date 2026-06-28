@@ -414,7 +414,8 @@ class TournamentSlotResolver:
                     home_p.team_id::text AS home_team_id,
                     away_p.team_id::text AS away_team_id,
                     m.home_score,
-                    m.away_score
+                    m.away_score,
+                    m.winner_team_id::text AS match_winner_team_id
                 FROM matches m
                 JOIN competition_stages cs ON cs.stage_id = m.stage_id
                 JOIN match_participants home_p
@@ -437,8 +438,11 @@ class TournamentSlotResolver:
                 winner, loser = r.home_team_id, r.away_team_id
             elif away_score > home_score:
                 winner, loser = r.away_team_id, r.home_team_id
+            elif r.match_winner_team_id:
+                # Draw after regulation — penalties winner stored in matches.winner_team_id
+                winner = r.match_winner_team_id
+                loser = r.away_team_id if winner == r.home_team_id else r.home_team_id
             else:
-                # Draw in knockout — winner determined by penalties (not stored separately yet)
                 winner = loser = None
             results[r.match_id] = {"winner_team_id": winner, "loser_team_id": loser}
         return results
