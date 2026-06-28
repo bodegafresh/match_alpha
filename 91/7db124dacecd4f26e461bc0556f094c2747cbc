@@ -1,0 +1,23 @@
+app/models/ai_adjuster.py
+  s_acedc47d393e24::t_1853cc1f0824f6 571
+  s_acedc47d393e24::t_46bf69616b27a6 150-198,202-210,213-242,248,255
+app/api/routes/web.py
+  s_acedc47d393e24::t_43941c69d4309a 433,436
+  s_acedc47d393e24::t_ca89f89efab1ea 267-268,272-282,287-297,300-334,346-347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "917db124dacecd4f26e461bc0556f094c2747cbc",
+  "prompts": {},
+  "sessions": {
+    "s_acedc47d393e24": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c6da0aff-581b-41b0-9499-515d6edfe372",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
