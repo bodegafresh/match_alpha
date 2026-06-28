@@ -280,7 +280,6 @@ async def get_feature_snapshot(
             SELECT *
             FROM feature_snapshots
             WHERE match_id = cast(:match_id as uuid)
-              AND team_id  = cast(:team_id as uuid)
               AND team_side = :team_side
               AND feature_set_version = :version
             ORDER BY as_of DESC
@@ -288,7 +287,6 @@ async def get_feature_snapshot(
         """),
         {
             "match_id": match_id,
-            "team_id": team_id,
             "team_side": team_side,
             "version": FEATURE_SET_VERSION,
         },
