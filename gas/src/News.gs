@@ -37,20 +37,22 @@ function runNewsSync() {
   }
   Logger.log('runNewsSync: ' + matches.length + ' partidos hoy.');
 
-  // 2. Recolectar equipos únicos
+  // 2. Recolectar equipos únicos con contexto del partido
   var teamSet = {};
   matches.forEach(function(m) {
-    if (m.home_team) teamSet[m.home_team] = m.match_id;
-    if (m.away_team) teamSet[m.away_team] = m.match_id;
+    if (m.home_team) teamSet[m.home_team] = { match_id: m.match_id, home_team: m.home_team, away_team: m.away_team };
+    if (m.away_team) teamSet[m.away_team] = { match_id: m.match_id, home_team: m.home_team, away_team: m.away_team };
   });
 
   // 3. Fetchear RSS por equipo y acumular artículos
   var allItems = [];
   Object.keys(teamSet).forEach(function(team) {
-    var matchId = teamSet[team];
+    var matchInfo = teamSet[team];
     var articles = fetchNewsForTeam_(team);
     articles.forEach(function(a) {
-      a.match_id = matchId;
+      a.match_id = matchInfo.match_id;
+      a.home_team = matchInfo.home_team;
+      a.away_team = matchInfo.away_team;
     });
     allItems = allItems.concat(articles);
     Utilities.sleep(300); // cortesía entre requests

@@ -674,7 +674,9 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
     if not today_matches:
         return {"ok": True, "data": {"matches_news": [], "generated_at": iso_utc()}}
 
+    import uuid as _uuid
     match_ids = [m["match_id"] for m in today_matches]
+    match_uuids = [_uuid.UUID(mid) for mid in match_ids]
 
     # AI context: matches that had AI adjustment applied
     ai_rows = await conn.execute(
@@ -684,7 +686,7 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
             WHERE mp.match_id = ANY(:ids)
               AND mp.explanation::text ILIKE '%ai_adjustment%'
         """),
-        {"ids": match_ids},
+        {"ids": match_uuids},
     )
     ai_adjusted_ids = {r[0] for r in ai_rows}
 
@@ -697,7 +699,7 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
             WHERE match_id = ANY(:ids)
             ORDER BY pub_date DESC NULLS LAST
         """),
-        {"ids": match_ids},
+        {"ids": match_uuids},
     )
     news_by_match: dict[str, list[dict]] = defaultdict(list)
     for r in news_rows:
