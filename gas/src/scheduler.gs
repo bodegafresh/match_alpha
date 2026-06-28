@@ -176,8 +176,8 @@ function checkBackendLatestStatus() {
 
 /**
  * runNewsSyncJob — trigger independiente para fetchear RSS de Google News.
- * Corre 1 hora antes del daily (5 AM UTC) para que las noticias estén
- * disponibles cuando el pipeline diario genere predicciones y resúmenes AI.
+ * Corre 1 hora antes del daily (9 AM UTC = 5 AM Chile, UTC-4 invierno) para que
+ * las noticias estén disponibles cuando el pipeline diario genere predicciones.
  * Se puede forzar manualmente desde el editor GAS.
  */
 function runNewsSyncJob() {
@@ -189,8 +189,8 @@ function runNewsSyncJob() {
  *
  * Intervalos:
  *   - Keepalive: 10 min  (Render Free duerme a los 15 min de inactividad)
- *   - News:       1 hora (5 AM UTC — antes del daily, para que AI las lea)
- *   - Daily:      1 hora (6 AM UTC con guard interno de hora+idempotencia)
+ *   - News:       1 hora (9 AM UTC — 1h antes del daily, para que AI las lea)
+ *   - Daily:      1 hora (10 AM UTC = 6 AM Chile, con guard interno de hora+idempotencia)
  *   - Live:       5 min  (actualización frecuente durante partidos WC2026)
  */
 function installMatchAlphaTriggers() {
@@ -203,10 +203,10 @@ function installMatchAlphaTriggers() {
     .everyMinutes(10)
     .create();
 
-  // News sync: 5 AM UTC (hora antes del daily a las 6 AM UTC)
+  // News sync: 9 AM UTC (hora antes del daily a las 10 AM UTC = 6 AM Chile, UTC-4 invierno)
   var news = ScriptApp.newTrigger('runNewsSyncJob')
     .timeBased()
-    .atHour(5)
+    .atHour(9)
     .everyDays(1)
     .inTimezone('UTC')
     .create();
@@ -227,7 +227,7 @@ function installMatchAlphaTriggers() {
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=10min news=5AM-UTC daily=1h live=5min');
+  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
