@@ -9,7 +9,7 @@ class BettingRepository(Repository):
         """Returns one candidate per prediction using the latest pre-kickoff odds snapshot."""
         return await self.fetch_all(
             """
-            select
+            select distinct on (p.match_id, p.market_id, p.selection_id)
               p.prediction_id::text,
               p.competition_season_id::text,
               p.match_id::text,
@@ -42,6 +42,7 @@ class BettingRepository(Repository):
             left join competition_status cs_status
               on cs_status.competition_season_id = p.competition_season_id
             where (p.calibrated_probability is not null or p.raw_probability is not null)
+            order by p.match_id, p.market_id, p.selection_id, p.as_of desc
             """,
         )
 

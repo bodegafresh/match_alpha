@@ -12,6 +12,7 @@ _HARD_BLOCK_REASONS = {
     "NO_ODDS_AVAILABLE",
     "COMPETITION_NOT_BETTABLE",
     "MISSING_PROBABILITY",
+    "EV_OUTLIER",
 }
 
 
@@ -59,6 +60,12 @@ def evaluate_decision(
 
     # --- EV calculation ---
     result = calculate_ev(prob_used, float(candidate["decimal_odds"]))
+
+    # Block statistically impossible EVs — these indicate bad odds data or uncalibrated model
+    EV_OUTLIER_THRESHOLD = 0.40  # 40% sustained EV is impossible in liquid markets
+    if result.ev > EV_OUTLIER_THRESHOLD:
+        block_reasons.append("EV_OUTLIER")
+        return _blocked(candidate, block_reasons)
 
     if result.ev <= 0:
         return {
