@@ -257,6 +257,17 @@ def _match_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+import json as _json_mod
+
+# Weather is fetched at most once per match per WEATHER_CACHE_TTL_HOURS.
+# After fetch it is persisted in matches.metadata so subsequent requests
+# read from DB instead of calling the external API.
+_WEATHER_CACHE_TTL_HOURS = 3
+# Only enrich matches that kick off within this window (no point fetching
+# weather for a match that is 7 days away).
+_WEATHER_LOOKAHEAD_HOURS = 48
+
+
 async def _fetch_weather_for_city(city: str | None, country: str | None) -> dict:
     """Fetch current weather from WeatherAPI. Returns {} if no key or city."""
     settings = get_settings()
@@ -265,7 +276,7 @@ async def _fetch_weather_for_city(city: str | None, country: str | None) -> dict
     import httpx
     try:
         location = f"{city},{country or ''}".strip(",")
-        async with httpx.AsyncClient(timeout=6) as client:
+        async with httpx.AsyncClient(timeout=5) as client:
             r = await client.get(
                 "https://api.weatherapi.com/v1/current.json",
                 params={"key": settings.weather_api_key, "q": location, "aqi": "no"},
@@ -277,18 +288,87 @@ async def _fetch_weather_for_city(city: str | None, country: str | None) -> dict
                     "condition": current.get("condition", {}).get("text"),
                     "wind_kph": current.get("wind_kph"),
                     "humidity_pct": current.get("humidity"),
+                    "fetched_at": iso_utc(),
                 }
     except Exception:
         pass
     return {}
 
 
-async def _enrich_weather(matches: list[dict]) -> list[dict]:
-    """Fetch weather concurrently for matches that lack it, using venue city."""
-    needs_weather = [
-        m for m in matches
-        if not m.get("weather") and m.get("venue", {}).get("city")
-    ]
+def _weather_is_fresh(weather: dict | None) -> bool:
+    """True if cached weather was fetched within TTL and can be reused."""
+    if not weather:
+        return False
+    fetched_at_str = weather.get("fetched_at")
+    if not fetched_at_str:
+        return False
+    try:
+        fetched_at = datetime.fromisoformat(fetched_at_str.replace("Z", "+00:00"))
+        age_hours = (datetime.now(UTC) - fetched_at).total_seconds() / 3600
+        return age_hours < _WEATHER_CACHE_TTL_HOURS
+    except Exception:
+        return False
+
+
+async def _persist_weather(conn: AsyncConnection, match_id: str, weather: dict) -> None:
+    """Persist fetched weather into matches.metadata to avoid future API calls."""
+    try:
+        await conn.execute(
+            text("""
+                UPDATE matches
+                SET metadata = COALESCE(metadata, '{}'::jsonb) || cast(:weather_patch as jsonb),
+                    updated_at = now()
+                WHERE match_id = cast(:match_id as uuid)
+            """),
+            {
+                "match_id": match_id,
+                "weather_patch": _json_mod.dumps({"weather": weather}),
+            },
+        )
+    except Exception:
+        pass  # Weather persistence is best-effort
+
+
+async def _enrich_weather(
+    matches: list[dict],
+    conn: AsyncConnection | None = None,
+    limit: int = 8,
+) -> list[dict]:
+    """Fetch weather for upcoming SCHEDULED matches that lack fresh cached data.
+
+    Rules:
+    - Only matches kicking off within the next _WEATHER_LOOKAHEAD_HOURS hours.
+    - Skip matches that already have fresh weather (within TTL).
+    - At most `limit` API calls per request (default 8, matching frontend param).
+    - Persist results to DB so next request reads from metadata.
+    """
+    now = datetime.now(UTC)
+    lookahead_cutoff = now.replace(tzinfo=UTC)
+
+    needs_weather: list[dict] = []
+    for m in matches:
+        # Already have fresh weather → skip
+        if _weather_is_fresh(m.get("weather")):
+            continue
+        # Only SCHEDULED matches within lookahead window
+        kickoff_str = m.get("kickoff_at")
+        if not kickoff_str:
+            continue
+        try:
+            kickoff = datetime.fromisoformat(str(kickoff_str).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        hours_until = (kickoff - lookahead_cutoff).total_seconds() / 3600
+        if hours_until < -2 or hours_until > _WEATHER_LOOKAHEAD_HOURS:
+            continue
+        if not m.get("venue", {}).get("city"):
+            continue
+        if m.get("status") == "FINISHED":
+            continue
+        needs_weather.append(m)
+
+    # Respect caller limit
+    needs_weather = needs_weather[:limit]
     if not needs_weather:
         return matches
 
@@ -300,12 +380,19 @@ async def _enrich_weather(matches: list[dict]) -> list[dict]:
         for m in needs_weather
     ], return_exceptions=True)
 
-    weather_map = {
-        m["match_id"]: (r if isinstance(r, dict) else {})
-        for m, r in zip(needs_weather, results)
-    }
+    persist_tasks = []
+    weather_map: dict[str, dict] = {}
+    for m, r in zip(needs_weather, results):
+        if isinstance(r, dict) and r:
+            weather_map[m["match_id"]] = r
+            if conn and m.get("match_id"):
+                persist_tasks.append(_persist_weather(conn, m["match_id"], r))
+
+    if persist_tasks:
+        await asyncio.gather(*persist_tasks, return_exceptions=True)
+
     for m in matches:
-        if m["match_id"] in weather_map and weather_map[m["match_id"]]:
+        if m["match_id"] in weather_map:
             m["weather"] = weather_map[m["match_id"]]
     return matches
 
@@ -324,7 +411,7 @@ async def web_matches(
         _parse_utc_datetime(kickoff_from),
         _parse_utc_datetime(kickoff_to),
     )
-    matches = await _enrich_weather([_match_from_row(row) for row in rows])
+    matches = await _enrich_weather([_match_from_row(row) for row in rows], conn=conn)
     data = {
         "season": {"slug": season or settings.default_season_slug},
         "matches": matches,
@@ -344,6 +431,7 @@ async def web_matches_overview(
     tomorrow_to: str | None = None,
     upcoming_from: str | None = None,
     upcoming_to: str | None = None,
+    weather_refresh_limit: int = Query(default=8, ge=0, le=20),
     conn: AsyncConnection = Depends(get_connection),
 ) -> dict:
     settings = get_settings()
@@ -356,7 +444,11 @@ async def web_matches_overview(
     kickoff_from = min(bounds) if bounds else None
     kickoff_to = max(bounds) if bounds else None
     repo = PublishedRepository(conn)
-    rows = await _enrich_weather([_match_from_row(row) for row in await repo.match_schedule(season_slug, kickoff_from, kickoff_to)])
+    rows = await _enrich_weather(
+        [_match_from_row(row) for row in await repo.match_schedule(season_slug, kickoff_from, kickoff_to)],
+        conn=conn,
+        limit=weather_refresh_limit,
+    )
 
     def in_range(row: dict[str, Any], start: str | None, end: str | None) -> bool:
         if not start and not end:
