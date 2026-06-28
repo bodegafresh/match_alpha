@@ -134,25 +134,13 @@ function runLiveBackendOrchestration() {
 
 /**
  * runWeeklyTeamsSync — corre domingos a las 2 AM UTC.
- * Sincroniza equipos de todas las ligas del catálogo via API-Football.
- * API-Football free tier: ~10 req/día — este job corre UNA VEZ POR SEMANA.
+ * Mantiene el nombre legacy del handler para reutilizar el trigger semanal existente,
+ * pero ejecuta la nueva orquestación de servicio única en backend.
  */
 function runWeeklyTeamsSync() {
   return logBackendCronResult_(
     'runWeeklyTeamsSync',
-    backendFetch_('/api/v1/jobs/sync_all_leagues_teams/run', { method: 'post', payload: { source: 'gas_weekly' } })
-  );
-}
-
-/**
- * runWeeklyPlayersSync — corre domingos a las 3 AM UTC (1h después de teams).
- * Sincroniza jugadores/planteles de todas las ligas del catálogo via API-Football.
- * Separado 1h de teams para no agotar el quota de API-Football en un solo burst.
- */
-function runWeeklyPlayersSync() {
-  return logBackendCronResult_(
-    'runWeeklyPlayersSync',
-    backendFetch_('/api/v1/jobs/sync_all_leagues_players/run', { method: 'post', payload: { source: 'gas_weekly' } })
+    backendFetch_('/api/v1/jobs/orchestrate/weekly', { method: 'post', payload: { source: 'gas_weekly' } })
   );
 }
 
@@ -216,8 +204,7 @@ function runNewsSyncJob() {
  *   - News:       1 hora (9 AM UTC — 1h antes del daily, para que AI las lea)
  *   - Daily:      1 hora (10 AM UTC = 6 AM Chile, con guard interno de hora+idempotencia)
  *   - Live:       5 min  (actualización frecuente durante partidos WC2026)
- *   - Teams sync: domingo 2 AM UTC (API-Football, free tier ~10 req/día)
- *   - Players sync: domingo 3 AM UTC (1h después de teams para no agotar quota)
+ *   - Weekly orchestration: domingo 2 AM UTC (teams + players + coverage validation)
  */
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();
@@ -247,20 +234,12 @@ function installMatchAlphaTriggers() {
     .everyMinutes(5)
     .create();
 
-  // Weekly team/player sync — domingos de madrugada UTC para evitar interferir
-  // con el daily (10 AM UTC) y el live (durante partidos). API-Football free tier
-  // permite ~10 req/día → se separan 1h para no agotar en un solo burst.
-  var teamsSync = ScriptApp.newTrigger('runWeeklyTeamsSync')
+  // Weekly orchestration — domingos de madrugada UTC para evitar interferir
+  // con el daily (10 AM UTC) y el live (durante partidos).
+  var weekly = ScriptApp.newTrigger('runWeeklyTeamsSync')
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.SUNDAY)
     .atHour(2)
-    .inTimezone('UTC')
-    .create();
-
-  var playersSync = ScriptApp.newTrigger('runWeeklyPlayersSync')
-    .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
-    .atHour(3)
     .inTimezone('UTC')
     .create();
 
@@ -269,18 +248,16 @@ function installMatchAlphaTriggers() {
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'NEWS', news.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
-  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC', teamsSync.getUniqueId());
-  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC', playersSync.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC', weekly.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM players=domingo-3AM');
+  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM(orchestrated)');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
     news_trigger_id: news.getUniqueId(),
     daily_trigger_id: daily.getUniqueId(),
     live_trigger_id: live.getUniqueId(),
-    teams_sync_trigger_id: teamsSync.getUniqueId(),
-    players_sync_trigger_id: playersSync.getUniqueId()
+    teams_sync_trigger_id: weekly.getUniqueId()
   };
 }
 
@@ -291,7 +268,6 @@ function removeMatchAlphaTriggers() {
     runDailyBackendOrchestration: true,
     runLiveBackendOrchestration: true,
     runWeeklyTeamsSync: true,
-    runWeeklyPlayersSync: true,
     checkBackendLatestStatus: true,
     checkBackendHealth: true
   };

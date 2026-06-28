@@ -16,7 +16,11 @@ from app.competitions.service import (
     worldcup_daily_refresh,
     worldcup_live_refresh,
 )
-from app.competitions.team_sync import sync_players_for_all_leagues, sync_teams_for_all_leagues
+from app.competitions.team_sync import (
+    sync_players_for_all_leagues,
+    sync_teams_for_all_leagues,
+    validate_sync_coverage_for_all_leagues,
+)
 from app.db.repositories.betting import BettingRepository
 from app.db.repositories.observability import ObservabilityRepository
 from app.decision.decision_engine import evaluate_decision
@@ -924,6 +928,12 @@ async def sync_all_leagues_fixtures_job(conn: AsyncConnection, payload: dict[str
     return await sync_competition_fixtures(conn, competition)
 
 
+async def validate_sync_coverage_all_leagues_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Post-cron validation by league: teams coverage + min players + roster consistency."""
+    min_players = int(payload.get("min_players_per_team", 11) or 11)
+    return await validate_sync_coverage_for_all_leagues(conn, min_players_per_team=min_players)
+
+
 async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     jobs: dict[str, JobFn] = {
@@ -953,6 +963,7 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "sync_all_leagues_teams": sync_all_leagues_teams_job,
         "sync_all_leagues_players": sync_all_leagues_players_job,
         "sync_all_leagues_fixtures": sync_all_leagues_fixtures_job,
+        "validate_sync_coverage_all_leagues": validate_sync_coverage_all_leagues_job,
     }
     scaffold_jobs = {
         "dataset_builder",

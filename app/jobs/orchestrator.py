@@ -82,6 +82,16 @@ class JobOrchestrator:
         ]
         return await self._run_plan("live", plan, context)
 
+    async def weekly(self) -> dict[str, Any]:
+        # Weekly maintenance orchestration for multi-league canonical sync.
+        context = await self._build_context()
+        plan = [
+            OrchestratedJob("sync_all_leagues_teams"),
+            OrchestratedJob("sync_all_leagues_players"),
+            OrchestratedJob("validate_sync_coverage_all_leagues"),
+        ]
+        return await self._run_plan("weekly", plan, context)
+
     async def should_run_job(self, job_name: str, window: str) -> bool:
         # Uses the generated column idempotency_key (migration 010) + index for fast lookup.
         row = await self.conn.execute(
