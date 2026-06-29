@@ -85,12 +85,10 @@ class JobOrchestrator:
         return await self._run_plan("live", plan, context)
 
     async def weekly(self) -> dict[str, Any]:
-        # Weekly maintenance orchestration for multi-league canonical sync.
+        # Weekly maintenance orchestration for multi-league team sync only.
         context = await self._build_context()
         plan = [
             OrchestratedJob("sync_all_leagues_teams"),
-            OrchestratedJob("sync_all_leagues_players"),
-            OrchestratedJob("validate_sync_coverage_all_leagues"),
         ]
         return await self._run_plan("weekly", plan, context)
 

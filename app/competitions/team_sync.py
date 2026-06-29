@@ -19,6 +19,7 @@ from app.competitions.catalog import supported_competitions
 from app.core.config import get_settings
 from app.core.time import iso_utc
 from app.db.repositories.observability import ObservabilityRepository
+from app.normalization.team_normalizer import slugify_name
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +39,8 @@ def _norm(name: str) -> str:
 
 
 def _slug(name: str) -> str:
-    return _norm(name).replace(" ", "-")
+    normalized = slugify_name(str(name or ""))
+    return normalized or _norm(name).replace(" ", "-")
 
 
 def _country_code_or_none(country: str | None) -> str | None:
@@ -46,6 +48,240 @@ def _country_code_or_none(country: str | None) -> str | None:
     if len(value) == 2 and value.isalpha():
         return value
     return None
+
+
+async def _resolve_country_code(conn: AsyncConnection, country_value: str | None, cache: dict[str, str | None]) -> str | None:
+    """Resolve source country strings to canonical ISO alpha-2 code.
+
+    Accepts alpha-2 directly and falls back to countries default_name/names/payload aliases.
+    """
+    value = (country_value or "").strip()
+    if not value:
+        return None
+
+    cache_key = _norm(value)
+    if cache_key in cache:
+        return cache[cache_key]
+
+    direct = _country_code_or_none(value)
+    if direct:
+        cache[cache_key] = direct
+        return direct
+
+    row = await conn.execute(
+        text(
+            """
+            SELECT c.code_alpha2
+            FROM countries c
+            WHERE lower(c.default_name) = lower(:value)
+               OR EXISTS (
+                    SELECT 1
+                    FROM jsonb_each_text(c.names) n
+                    WHERE lower(n.value) = lower(:value)
+               )
+               OR EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(coalesce(c.payload->'aliases', '[]'::jsonb)) a
+                    WHERE lower(a.value) = lower(:value)
+               )
+            LIMIT 1
+            """
+        ),
+        {"value": value},
+    )
+    resolved = row.scalar_one_or_none()
+    cache[cache_key] = resolved
+    return resolved
+
+
+async def _upsert_team_alias(conn: AsyncConnection, team_id: str, alias: str, source: str) -> None:
+    normalized_alias = _norm(alias)
+    if not normalized_alias:
+        return
+    await conn.execute(
+        text(
+            """
+            INSERT INTO team_aliases
+              (team_id, alias, normalized_alias, source, confidence)
+            VALUES
+              (cast(:team_id as uuid), :alias, :normalized_alias, :source, 1)
+            ON CONFLICT (normalized_alias, source) DO UPDATE SET
+              team_id = excluded.team_id,
+              alias = excluded.alias,
+              confidence = excluded.confidence,
+              updated_at = now()
+            """
+        ),
+        {
+            "team_id": team_id,
+            "alias": alias,
+            "normalized_alias": normalized_alias,
+            "source": source,
+        },
+    )
+
+
+async def _upsert_team_external_ref(
+    conn: AsyncConnection,
+    team_id: str,
+    source: str,
+    source_team_id: str,
+    source_team_name: str,
+) -> None:
+    await conn.execute(
+        text(
+            """
+            INSERT INTO entity_external_refs
+              (entity_type, entity_id, source, source_entity_type, source_entity_id, source_entity_name, confidence, is_primary, payload)
+            VALUES
+              ('TEAM', cast(:team_id as uuid), :source, 'team', :source_team_id, :source_team_name, 1, true,
+               cast(:payload as jsonb))
+            ON CONFLICT (entity_type, source, source_entity_id) DO UPDATE SET
+              entity_id = excluded.entity_id,
+              source_entity_name = excluded.source_entity_name,
+              confidence = excluded.confidence,
+              payload = entity_external_refs.payload || excluded.payload,
+              updated_at = now()
+            """
+        ),
+        {
+            "team_id": team_id,
+            "source": source,
+            "source_team_id": source_team_id,
+            "source_team_name": source_team_name,
+            "payload": _json({"resolver": "team_sync", "source": source}),
+        },
+    )
+
+
+async def _resolve_or_create_team(
+    conn: AsyncConnection,
+    *,
+    source: str,
+    source_team_id: str,
+    display_name: str,
+    team_type: str,
+    country_code: str | None,
+    metadata: dict[str, Any],
+) -> str:
+    """Resolve canonical team across source naming variants and create only when needed."""
+    # 1) Exact source external ref.
+    ext_row = await conn.execute(
+        text(
+            """
+            SELECT entity_id::text
+            FROM entity_external_refs
+            WHERE entity_type = 'TEAM'
+              AND source = :source
+              AND source_entity_id = :source_team_id
+            LIMIT 1
+            """
+        ),
+        {"source": source, "source_team_id": source_team_id},
+    )
+    team_id = ext_row.scalar_one_or_none()
+
+    # 2) Fuzzy canonical identity by normalized_name + team_type (+ optional country).
+    if not team_id:
+        filters = ["normalized_name = :normalized_name", "team_type = cast(:team_type as team_type)"]
+        params: dict[str, Any] = {
+            "normalized_name": _norm(display_name),
+            "team_type": team_type,
+        }
+        if country_code:
+            filters.append("country_code = :country_code")
+            params["country_code"] = country_code
+
+        row = await conn.execute(
+            text(
+                f"""
+                SELECT team_id::text
+                FROM teams
+                WHERE {' AND '.join(filters)}
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ),
+            params,
+        )
+        team_id = row.scalar_one_or_none()
+
+    # 3) Alias-based match.
+    if not team_id:
+        row = await conn.execute(
+            text(
+                """
+                SELECT ta.team_id::text
+                FROM team_aliases ta
+                JOIN teams t ON t.team_id = ta.team_id
+                WHERE ta.normalized_alias = :normalized_alias
+                  AND t.team_type = cast(:team_type as team_type)
+                ORDER BY ta.updated_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "normalized_alias": _norm(display_name),
+                "team_type": team_type,
+            },
+        )
+        team_id = row.scalar_one_or_none()
+
+    # 4) Create if unresolved.
+    if not team_id:
+        created = await conn.execute(
+            text(
+                """
+                INSERT INTO teams
+                  (slug, team_type, display_name, normalized_name, country_code, metadata)
+                VALUES
+                  (:slug, cast(:team_type as team_type), :display_name, :normalized_name, :country_code,
+                   cast(:metadata as jsonb))
+                ON CONFLICT (slug) DO UPDATE SET
+                  display_name = excluded.display_name,
+                  normalized_name = excluded.normalized_name,
+                  team_type = excluded.team_type,
+                  country_code = COALESCE(excluded.country_code, teams.country_code),
+                  metadata = teams.metadata || excluded.metadata,
+                  updated_at = now()
+                RETURNING team_id::text
+                """
+            ),
+            {
+                "slug": _slug(display_name),
+                "team_type": team_type,
+                "display_name": display_name,
+                "normalized_name": _norm(display_name),
+                "country_code": country_code,
+                "metadata": _json(metadata),
+            },
+        )
+        team_id = created.scalar_one()
+    else:
+        await conn.execute(
+            text(
+                """
+                UPDATE teams
+                SET display_name = COALESCE(:display_name, display_name),
+                    normalized_name = COALESCE(:normalized_name, normalized_name),
+                    country_code = COALESCE(:country_code, country_code),
+                    metadata = teams.metadata || cast(:metadata as jsonb),
+                    updated_at = now()
+                WHERE team_id = cast(:team_id as uuid)
+                """
+            ),
+            {
+                "team_id": team_id,
+                "display_name": display_name,
+                "normalized_name": _norm(display_name),
+                "country_code": country_code,
+                "metadata": _json(metadata),
+            },
+        )
+
+    await _upsert_team_alias(conn, team_id, display_name, source)
+    await _upsert_team_external_ref(conn, team_id, source, source_team_id, display_name)
+    return team_id
 
 
 async def _table_exists(conn: AsyncConnection, table_name: str) -> bool:
@@ -100,6 +336,7 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
     errors: list[str] = []
     skipped: list[dict[str, str]] = []
     league_stats: list[dict[str, Any]] = []
+    country_cache: dict[str, str | None] = {}
     schema_mode = await _detect_sync_schema(conn)
 
     if schema_mode != SCHEMA_CANONICAL:
@@ -170,43 +407,26 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             external_id = str(team_info["id"])
 
             try:
-                team_row = await conn.execute(
-                    text(
-                        """
-                        INSERT INTO teams
-                          (slug, team_type, display_name, normalized_name, country_code, metadata)
-                        VALUES
-                          (:slug, cast(:team_type as team_type), :display_name, :normalized_name, :country_code,
-                           cast(:metadata as jsonb))
-                        ON CONFLICT (slug) DO UPDATE SET
-                          display_name = excluded.display_name,
-                          normalized_name = excluded.normalized_name,
-                          team_type = excluded.team_type,
-                          country_code = COALESCE(excluded.country_code, teams.country_code),
-                          metadata = teams.metadata || excluded.metadata,
-                          updated_at = now()
-                        RETURNING team_id::text
-                        """
-                    ),
-                    {
-                        "slug": team_slug,
-                        "team_type": "NATIONAL_TEAM" if bool(team_info.get("national", False)) else "CLUB",
-                        "display_name": team_info.get("name", team_slug),
-                        "normalized_name": _norm(team_info.get("name", team_slug)),
-                        "country_code": _country_code_or_none(team_info.get("country")),
-                        "metadata": _json(
-                            {
-                                "api_football_id": external_id,
-                                "country": team_info.get("country"),
-                                "founded_year": team_info.get("founded"),
-                                "stadium_name": venue_info.get("name"),
-                                "stadium_capacity": venue_info.get("capacity"),
-                                "logo_url": team_info.get("logo"),
-                            }
-                        ),
+                team_name = team_info.get("name", team_slug)
+                team_type = "NATIONAL_TEAM" if bool(team_info.get("national", False)) else "CLUB"
+                country_code = await _resolve_country_code(conn, team_info.get("country"), country_cache)
+                team_id = await _resolve_or_create_team(
+                    conn,
+                    source="API_FOOTBALL",
+                    source_team_id=external_id,
+                    display_name=team_name,
+                    team_type=team_type,
+                    country_code=country_code,
+                    metadata={
+                        "api_football_id": external_id,
+                        "country": team_info.get("country"),
+                        "founded_year": team_info.get("founded"),
+                        "stadium_name": venue_info.get("name"),
+                        "stadium_capacity": venue_info.get("capacity"),
+                        "logo_url": team_info.get("logo"),
+                        "ingestion_source": "API_FOOTBALL",
                     },
                 )
-                team_id = team_row.scalar_one()
 
                 # Link team to competition_season
                 await conn.execute(
@@ -293,11 +513,301 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             "generated_at": iso_utc(),
         }
 
+    async def _upsert_player_alias(player_id: str, alias: str, source: str) -> None:
+        normalized_alias = _norm(alias)
+        if not normalized_alias:
+            return
+        await conn.execute(
+            text(
+                """
+                INSERT INTO player_aliases
+                  (player_id, alias, normalized_alias, source, confidence)
+                VALUES
+                  (cast(:player_id as uuid), :alias, :normalized_alias, :source, 1)
+                ON CONFLICT (normalized_alias, source) DO UPDATE SET
+                  player_id = excluded.player_id,
+                  alias = excluded.alias,
+                  confidence = excluded.confidence,
+                  updated_at = now()
+                """
+            ),
+            {
+                "player_id": player_id,
+                "alias": alias,
+                "normalized_alias": normalized_alias,
+                "source": source,
+            },
+        )
+
+    async def _upsert_player_external_ref(player_id: str, source: str, source_player_id: str, source_player_name: str) -> None:
+        await conn.execute(
+            text(
+                """
+                INSERT INTO entity_external_refs
+                  (entity_type, entity_id, source, source_entity_type, source_entity_id, source_entity_name, confidence, is_primary, payload)
+                VALUES
+                  ('PLAYER', cast(:player_id as uuid), :source, 'player', :source_player_id, :source_player_name, 1, true,
+                   cast(:payload as jsonb))
+                ON CONFLICT (entity_type, source, source_entity_id) DO UPDATE SET
+                  entity_id = excluded.entity_id,
+                  source_entity_name = excluded.source_entity_name,
+                  confidence = excluded.confidence,
+                  payload = entity_external_refs.payload || excluded.payload,
+                  updated_at = now()
+                """
+            ),
+            {
+                "player_id": player_id,
+                "source": source,
+                "source_player_id": source_player_id,
+                "source_player_name": source_player_name,
+                "payload": _json({"resolver": "player_sync", "source": source}),
+            },
+        )
+
+    async def _resolve_or_create_player(
+        *,
+        source: str,
+        source_player_id: str,
+        display_name: str,
+        birth_date: str | None,
+        nationality_country_code: str | None,
+        metadata: dict[str, Any],
+    ) -> str:
+        # 1) Exact source external ref.
+        ext = await conn.execute(
+            text(
+                """
+                SELECT entity_id::text
+                FROM entity_external_refs
+                WHERE entity_type = 'PLAYER'
+                  AND source = :source
+                  AND source_entity_id = :source_player_id
+                LIMIT 1
+                """
+            ),
+            {"source": source, "source_player_id": source_player_id},
+        )
+        player_id = ext.scalar_one_or_none()
+
+        # 2) Identity by normalized_name + birth_date + nationality.
+        if not player_id and birth_date:
+            row = await conn.execute(
+                text(
+                    """
+                    SELECT player_id::text
+                    FROM players
+                    WHERE normalized_name = :normalized_name
+                      AND birth_date = cast(:birth_date as date)
+                      AND (
+                        :nationality_country_code is null
+                        OR nationality_country_code = :nationality_country_code
+                      )
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "normalized_name": _norm(display_name),
+                    "birth_date": birth_date,
+                    "nationality_country_code": nationality_country_code,
+                },
+            )
+            player_id = row.scalar_one_or_none()
+
+        # 3) Alias fallback.
+        if not player_id:
+            row = await conn.execute(
+                text(
+                    """
+                    SELECT pa.player_id::text
+                    FROM player_aliases pa
+                    WHERE pa.normalized_alias = :normalized_alias
+                    ORDER BY pa.updated_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"normalized_alias": _norm(display_name)},
+            )
+            player_id = row.scalar_one_or_none()
+
+        if not player_id:
+            slug = f"{_slug(display_name)}-{source.lower()}-{source_player_id}"[:180]
+            created = await conn.execute(
+                text(
+                    """
+                    INSERT INTO players
+                      (slug, display_name, normalized_name, birth_date, nationality_country_code, metadata)
+                    VALUES
+                      (:slug, :display_name, :normalized_name, cast(:birth_date as date), :nationality_country_code,
+                       cast(:metadata as jsonb))
+                    RETURNING player_id::text
+                    """
+                ),
+                {
+                    "slug": slug,
+                    "display_name": display_name,
+                    "normalized_name": _norm(display_name),
+                    "birth_date": birth_date,
+                    "nationality_country_code": nationality_country_code,
+                    "metadata": _json(metadata),
+                },
+            )
+            player_id = created.scalar_one()
+        else:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE players
+                    SET display_name = COALESCE(:display_name, display_name),
+                        normalized_name = COALESCE(:normalized_name, normalized_name),
+                        birth_date = COALESCE(cast(:birth_date as date), birth_date),
+                        nationality_country_code = COALESCE(:nationality_country_code, nationality_country_code),
+                        metadata = players.metadata || cast(:metadata as jsonb),
+                        updated_at = now()
+                    WHERE player_id = cast(:player_id as uuid)
+                    """
+                ),
+                {
+                    "player_id": player_id,
+                    "display_name": display_name,
+                    "normalized_name": _norm(display_name),
+                    "birth_date": birth_date,
+                    "nationality_country_code": nationality_country_code,
+                    "metadata": _json(metadata),
+                },
+            )
+
+        await _upsert_player_alias(player_id, display_name, source)
+        await _upsert_player_external_ref(player_id, source, source_player_id, display_name)
+        return player_id
+
+    async def _resolve_team_id_for_api_football(team_external_id: str) -> str | None:
+        ref_row = await conn.execute(
+            text(
+                """
+                SELECT entity_id::text
+                FROM entity_external_refs
+                WHERE entity_type = 'TEAM'
+                  AND source = 'API_FOOTBALL'
+                  AND source_entity_id = :team_external_id
+                LIMIT 1
+                """
+            ),
+            {"team_external_id": team_external_id},
+        )
+        team_id = ref_row.scalar_one_or_none()
+        if team_id:
+            return team_id
+
+        legacy_row = await conn.execute(
+            text(
+                """
+                SELECT t.team_id::text
+                FROM teams t
+                JOIN competition_team_entries cte ON cte.team_id = t.team_id
+                WHERE cte.competition_season_id = cast(:cs_id as uuid)
+                  AND cte.metadata->>'external_id' = :team_external_id
+                LIMIT 1
+                """
+            ),
+            {"cs_id": competition_season_id, "team_external_id": team_external_id},
+        )
+        return legacy_row.scalar_one_or_none()
+
+    async def _upsert_team_membership(player_id: str, team_id: str, source: str) -> None:
+        await conn.execute(
+            text(
+                """
+                UPDATE team_memberships
+                SET valid_to_at = now(),
+                    updated_at = now(),
+                    metadata = team_memberships.metadata || '{"ended_by":"player_sync"}'::jsonb
+                WHERE player_id = cast(:player_id as uuid)
+                  AND source = :source
+                  AND membership_type = 'CLUB'
+                  AND valid_to_at IS NULL
+                  AND team_id <> cast(:team_id as uuid)
+                """
+            ),
+            {"player_id": player_id, "team_id": team_id, "source": source},
+        )
+
+        await conn.execute(
+            text(
+                """
+                INSERT INTO team_memberships
+                  (player_id, team_id, membership_type, valid_from_at, valid_to_at, source, confidence, metadata)
+                VALUES
+                  (cast(:player_id as uuid), cast(:team_id as uuid), 'CLUB', now(), null, :source, 1,
+                   cast(:metadata as jsonb))
+                ON CONFLICT (player_id, team_id, membership_type, source) DO UPDATE SET
+                  valid_to_at = null,
+                  confidence = excluded.confidence,
+                  metadata = team_memberships.metadata || excluded.metadata,
+                  updated_at = now()
+                """
+            ),
+            {
+                "player_id": player_id,
+                "team_id": team_id,
+                "source": source,
+                "metadata": _json({"updated_by": "player_sync"}),
+            },
+        )
+
+    async def _reconcile_removed_rosters(active_pairs: list[dict[str, str]]) -> int:
+        if not active_pairs:
+            result = await conn.execute(
+                text(
+                    """
+                    UPDATE competition_rosters cr
+                    SET roster_status = 'CUT',
+                        updated_at = now(),
+                        metadata = cr.metadata || '{"deactivated_by":"player_sync","source":"API_FOOTBALL"}'::jsonb
+                    WHERE cr.competition_season_id = cast(:cs_id as uuid)
+                      AND coalesce(cr.metadata->>'source','') = 'API_FOOTBALL'
+                      AND cr.roster_status in ('ACTIVE', 'CALLED_UP', 'UNKNOWN')
+                    """
+                ),
+                {"cs_id": competition_season_id},
+            )
+            return int(result.rowcount or 0)
+
+        result = await conn.execute(
+            text(
+                """
+                WITH active_pairs AS (
+                  SELECT
+                    cast(item->>'team_id' as uuid) AS team_id,
+                    cast(item->>'player_id' as uuid) AS player_id
+                  FROM jsonb_array_elements(cast(:active_pairs as jsonb)) item
+                )
+                UPDATE competition_rosters cr
+                SET roster_status = 'CUT',
+                    updated_at = now(),
+                    metadata = cr.metadata || '{"deactivated_by":"player_sync","source":"API_FOOTBALL"}'::jsonb
+                WHERE cr.competition_season_id = cast(:cs_id as uuid)
+                  AND coalesce(cr.metadata->>'source','') = 'API_FOOTBALL'
+                  AND cr.roster_status in ('ACTIVE', 'CALLED_UP', 'UNKNOWN')
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM active_pairs a
+                    WHERE a.team_id = cr.team_id
+                      AND a.player_id = cr.player_id
+                  )
+                """
+            ),
+            {"cs_id": competition_season_id, "active_pairs": _json(active_pairs)},
+        )
+        return int(result.rowcount or 0)
+
     client = ApiFootballClient()
     total_players = 0
     errors: list[str] = []
     skipped: list[dict[str, str]] = []
     league_stats: list[dict[str, Any]] = []
+    country_cache: dict[str, str | None] = {}
     schema_mode = await _detect_sync_schema(conn)
 
     if schema_mode != SCHEMA_CANONICAL:
@@ -337,6 +847,7 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         league_processed = 0
         league_errors = 0
         pages_processed = 0
+        active_pairs: list[dict[str, str]] = []
 
         page = 1
         while True:
@@ -368,72 +879,35 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                 if not player_info.get("id"):
                     continue
 
-                player_slug = _slug(f"{player_info.get('firstname', '')} {player_info.get('lastname', '')}")
                 external_id = str(player_info["id"])
 
                 try:
-                    player_row = await conn.execute(
-                        text(
-                            """
-                            INSERT INTO players
-                              (slug, display_name, normalized_name, birth_date,
-                               nationality_country_code, metadata)
-                            VALUES
-                              (:slug, :display_name, :normalized_name, cast(:dob as date),
-                               :nationality_country_code, cast(:metadata as jsonb))
-                            ON CONFLICT (slug) DO UPDATE SET
-                              display_name = excluded.display_name,
-                              normalized_name = excluded.normalized_name,
-                              birth_date = COALESCE(excluded.birth_date, players.birth_date),
-                              nationality_country_code = COALESCE(
-                                excluded.nationality_country_code,
-                                players.nationality_country_code
-                              ),
-                              metadata = players.metadata || excluded.metadata,
-                              updated_at = now()
-                            RETURNING player_id::text
-                            """
-                        ),
-                        {
-                            "slug": player_slug or f"player-{external_id}",
-                            "display_name": player_info.get("name")
-                            or f"{player_info.get('firstname','')} {player_info.get('lastname','')}".strip(),
-                            "normalized_name": _norm(
-                                player_info.get("name")
-                                or f"{player_info.get('firstname','')} {player_info.get('lastname','')}".strip()
-                            ),
-                            "dob": player_info.get("birth", {}).get("date"),
-                            "nationality_country_code": _country_code_or_none(player_info.get("nationality")),
-                            "metadata": _json(
-                                {
-                                    "api_football_id": external_id,
-                                    "position": player_info.get("position"),
-                                    "number": player_info.get("number"),
-                                    "photo_url": player_info.get("photo"),
-                                    "nationality": player_info.get("nationality"),
-                                }
-                            ),
+                    player_name = (
+                        player_info.get("name")
+                        or f"{player_info.get('firstname','')} {player_info.get('lastname','')}".strip()
+                        or f"player-{external_id}"
+                    )
+                    player_id = await _resolve_or_create_player(
+                        source="API_FOOTBALL",
+                        source_player_id=external_id,
+                        display_name=player_name,
+                        birth_date=player_info.get("birth", {}).get("date"),
+                        nationality_country_code=await _resolve_country_code(conn, player_info.get("nationality"), country_cache),
+                        metadata={
+                            "api_football_id": external_id,
+                            "position": player_info.get("position"),
+                            "number": player_info.get("number"),
+                            "photo_url": player_info.get("photo"),
+                            "nationality": player_info.get("nationality"),
+                            "ingestion_source": "API_FOOTBALL",
                         },
                     )
-                    player_id = player_row.scalar_one()
 
-                    # Roster link: find team_id by API-Football team id stored in competition_team_entries.metadata.
+                    # Roster/membership links.
                     if team_info.get("id"):
                         team_ext = str(team_info["id"])
-                        team_row = await conn.execute(
-                            text(
-                                """
-                                SELECT t.team_id::text FROM teams t
-                                JOIN competition_team_entries cte ON cte.team_id = t.team_id
-                                WHERE cte.competition_season_id = cast(:cs_id as uuid)
-                                  AND cte.metadata->>'external_id' = :ext_id
-                                LIMIT 1
-                                """
-                            ),
-                            {"cs_id": competition_season_id, "ext_id": team_ext},
-                        )
-                        team_link = team_row.fetchone()
-                        if team_link:
+                        team_id = await _resolve_team_id_for_api_football(team_ext)
+                        if team_id:
                             await conn.execute(
                                 text(
                                     """
@@ -446,19 +920,30 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                                     ON CONFLICT (competition_season_id, team_id, player_id) DO UPDATE SET
                                       position = COALESCE(excluded.position, competition_rosters.position),
                                       shirt_number = COALESCE(excluded.shirt_number, competition_rosters.shirt_number),
+                                      roster_status = 'ACTIVE',
                                       metadata = competition_rosters.metadata || excluded.metadata,
                                       updated_at = now()
                                     """
                                 ),
                                 {
                                     "cs_id": competition_season_id,
-                                    "team_id": team_link[0],
+                                    "team_id": team_id,
                                     "player_id": player_id,
                                     "position": player_info.get("position"),
                                     "number": player_info.get("number"),
-                                    "metadata": _json({"source": "API_FOOTBALL", "team_external_id": team_ext}),
+                                    "metadata": _json(
+                                        {
+                                            "source": "API_FOOTBALL",
+                                            "team_external_id": team_ext,
+                                            "league": entry.slug,
+                                        }
+                                    ),
                                 },
                             )
+
+                            await _upsert_team_membership(player_id, team_id, "API_FOOTBALL")
+                            active_pairs.append({"team_id": team_id, "player_id": player_id})
+
                     total_players += 1
                     league_processed += 1
                 except Exception as exc:
@@ -469,6 +954,8 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             if not items or paging.get("current") >= paging.get("total", 1):
                 break
             page += 1
+
+        deactivated_rosters = await _reconcile_removed_rosters(active_pairs)
 
         if league_errors > 0:
             league_status = "WARN"
@@ -484,6 +971,7 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                 "players_processed": league_processed,
                 "pages_processed": pages_processed,
                 "errors": league_errors,
+                "rosters_deactivated": deactivated_rosters,
             }
         )
         await _record_sync_event(
@@ -496,6 +984,7 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                 "players_processed": league_processed,
                 "pages_processed": pages_processed,
                 "errors": league_errors,
+                "rosters_deactivated": deactivated_rosters,
                 "status": league_status,
             },
         )

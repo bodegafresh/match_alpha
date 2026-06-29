@@ -137,7 +137,7 @@ function runLiveBackendOrchestration() {
 /**
  * runWeeklyTeamsSync — corre domingos a las 2 AM UTC.
  * Mantiene el nombre legacy del handler para reutilizar el trigger semanal existente,
- * pero ejecuta la nueva orquestación de servicio única en backend.
+ * pero ejecuta la nueva orquestación de servicio única en backend (solo equipos).
  */
 function runWeeklyTeamsSync() {
   return logBackendCronResult_(
@@ -239,7 +239,7 @@ function runNewsSyncJob() {
  *   - News:       1 hora (9 AM UTC — 1h antes del daily, para que AI las lea)
  *   - Daily:      1 hora (10 AM UTC = 6 AM Chile, con guard interno de hora+idempotencia)
  *   - Live:       5 min  (actualización frecuente durante partidos WC2026)
- *   - Weekly orchestration: domingo 2 AM UTC (teams + players + coverage validation)
+ *   - Weekly orchestration: domingo 2 AM UTC (teams only)
  */
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();

@@ -70,7 +70,7 @@ Telegram:
 - Trigger GAS semanal existente (`runWeeklyTeamsSync`) ejecuta una sola llamada al servicio:
   - `POST /api/v1/jobs/orchestrate/weekly`
 - Flujo semanal backend:
-  - `sync_all_leagues_teams` -> `sync_all_leagues_players` -> `validate_sync_coverage_all_leagues`
+  - `sync_all_leagues_teams`
 
 Recuperacion manual rapida (si falla una corrida semanal):
 

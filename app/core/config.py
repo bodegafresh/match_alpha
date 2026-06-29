@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     football_data_token: str | None = Field(default=None, alias="FOOTBALL_DATA_TOKEN")
     sportmonks_api_token: str | None = Field(default=None, alias="SPORTMONKS_API_TOKEN")
     api_football_key: str | None = Field(default=None, alias="API_FOOTBALL_KEY")
+    api_football_daily_budget: int = Field(default=100, alias="API_FOOTBALL_DAILY_BUDGET")
     the_odds_api_key: str | None = Field(default=None, alias="THE_ODDS_API_KEY")
     weather_api_key: str | None = Field(default=None, alias="WEATHER_API_KEY")
     news_api_key: str | None = Field(default=None, alias="NEWS_API_KEY")
