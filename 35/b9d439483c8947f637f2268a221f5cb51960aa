@@ -1,0 +1,33 @@
+app/news/__init__.py
+  s_5464458db59e8d::t_b61f25eccb9174 1-3
+app/news/context_pipeline.py
+  s_5464458db59e8d::t_854e012ff09ae3 1-358,393-395,398-468,509-526,528-674
+  s_5464458db59e8d::t_9256590f60ba36 359-392,396-397,469-508,527
+README.md
+  s_5464458db59e8d::t_b2347050f9c82f 34,93-102,132
+app/models/ai_adjuster.py
+  s_5464458db59e8d::t_d94bd0b30bdc96 381,386-407,412-413
+  s_5464458db59e8d::t_2bb6f767fa4ce1 281-305,318,372,375-380,382-385,408-411,414-417,451-453,645,647,670
+supabase/migrations/028_news_context_pipeline.sql
+  s_5464458db59e8d::t_8d7e0d78152f50 1-34
+app/jobs/registry.py
+  s_5464458db59e8d::t_70bfe95edeec8d 50,1165-1169,1207
+app/jobs/orchestrator.py
+  s_5464458db59e8d::t_8889f6a77d46ac 62
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "35b9d439483c8947f637f2268a221f5cb51960aa",
+  "prompts": {},
+  "sessions": {
+    "s_5464458db59e8d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "07c90802-5b7f-4a48-9c11-612e4c1d71c7",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
