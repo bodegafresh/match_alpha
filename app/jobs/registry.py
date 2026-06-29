@@ -16,7 +16,11 @@ from app.competitions.service import (
     worldcup_daily_refresh,
     worldcup_live_refresh,
 )
-from app.competitions.team_sync import sync_players_for_all_leagues, sync_teams_for_all_leagues
+from app.competitions.team_sync import (
+    sync_players_for_all_leagues,
+    sync_teams_for_all_leagues,
+    validate_sync_coverage_for_all_leagues,
+)
 from app.db.repositories.betting import BettingRepository
 from app.db.repositories.observability import ObservabilityRepository
 from app.decision.decision_engine import evaluate_decision
@@ -29,9 +33,21 @@ from app.calibration.evaluator import run_calibration
 from app.feedback.clv_calculator import compute_pending_clv
 from app.feedback.settlement_service import settle_pending_decisions
 from app.models.poisson_predictor import _get_or_create_model_registry, run_poisson_prediction
+from app.normalization.core_entities_dedup import (
+    reconcile_referees_identity,
+    reconcile_teams_identity,
+    reconcile_venues_identity,
+)
+from app.normalization.core_entities_identity import validate_core_entities_identity_consistency
+from app.normalization.player_dedup import (
+    reconcile_players_identity,
+    validate_players_identity_consistency,
+)
 from app.models.ai_adjuster import adjust_predictions_with_ai
 from app.models.drift_detector import detect_drift
 from app.models.lgbm.retraining_pipeline import run_retraining
+from app.services.notifications.telegram import notify_text
+from app.news.context_pipeline import build_news_context
 
 JobFn = Callable[[AsyncConnection, dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -892,7 +908,15 @@ async def qualification_resolver_job(conn: AsyncConnection, payload: dict[str, A
     if not season_id:
         return {"status": "SKIPPED", "reason": f"no active season for slug={season_slug}", "records_processed": 0}
 
-    result = await run_qualification_resolver(conn, season_id)
+    send_group_notifications = payload.get("send_group_notifications")
+    if send_group_notifications is None:
+        send_group_notifications = payload.get("orchestrator") != "live"
+
+    result = await run_qualification_resolver(
+        conn,
+        season_id,
+        send_group_notifications=bool(send_group_notifications),
+    )
     return {
         "status": "ERROR" if result.errors else "OK",
         "records_processed": result.slots_resolved + result.groups_processed,
@@ -906,6 +930,128 @@ async def qualification_resolver_job(conn: AsyncConnection, payload: dict[str, A
     }
 
 
+async def telegram_daily_summary_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Send 8AM CL summary to Telegram with last daily run + EV+ highlights."""
+    settings = get_settings()
+    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+        return {
+            "status": "SKIPPED",
+            "job_name": "telegram_daily_summary",
+            "records_processed": 0,
+            "reason": "TELEGRAM_NOT_CONFIGURED",
+        }
+
+    limit = int(payload.get("ev_limit", 8) or 8)
+    run_row = await conn.execute(
+        text(
+            """
+            select pipeline_run_id::text as pipeline_run_id,
+                   started_at,
+                   finished_at,
+                   status,
+                   records_processed,
+                   payload
+            from pipeline_runs
+            where job_name = 'orchestrate_daily'
+              and status in ('OK', 'WARN')
+            order by started_at desc
+            limit 1
+            """
+        )
+    )
+    daily_run = run_row.fetchone()
+    if not daily_run:
+        return {
+            "status": "WARN",
+            "job_name": "telegram_daily_summary",
+            "records_processed": 0,
+            "reason": "NO_DAILY_RUN_FOUND",
+        }
+
+    run_data = dict(daily_run._mapping)
+    run_payload = run_data.get("payload") or {}
+    started_at = run_data["started_at"]
+
+    ev_rows_result = await conn.execute(
+        text(
+            """
+            select
+              bd.betting_decision_id::text as betting_decision_id,
+              bd.ev,
+              bd.edge,
+              bd.decided_at,
+              m.market_code,
+              s.selection_code,
+              home_team.display_name as home_team,
+              away_team.display_name as away_team,
+              coalesce(
+                bd.payload->>'graph_url',
+                bd.payload->>'chart_url',
+                bd.payload->>'plot_url',
+                bd.payload->>'image_url',
+                bd.payload->>'dashboard_url'
+              ) as graph_url
+            from betting_decisions bd
+            join model_predictions p on p.prediction_id = bd.prediction_id
+            join markets m on m.market_id = p.market_id
+            join market_selections s on s.selection_id = p.selection_id
+            join matches mt on mt.match_id = bd.match_id
+            left join match_participants home on home.match_id = mt.match_id and home.side = 'HOME'
+            left join teams home_team on home_team.team_id = home.team_id
+            left join match_participants away on away.match_id = mt.match_id and away.side = 'AWAY'
+            left join teams away_team on away_team.team_id = away.team_id
+            where bd.decision_status = 'BETTABLE'
+              and bd.decided_at >= cast(:started_at as timestamptz)
+            order by bd.ev desc nulls last, bd.decided_at desc
+            limit :limit
+            """
+        ),
+        {"started_at": started_at, "limit": limit},
+    )
+    ev_rows = [dict(r._mapping) for r in ev_rows_result]
+
+    executed = run_payload.get("executed", []) if isinstance(run_payload, dict) else []
+    skipped = run_payload.get("skipped", []) if isinstance(run_payload, dict) else []
+    failed = run_payload.get("failed", []) if isinstance(run_payload, dict) else []
+
+    lines = [
+        "📊 <b>Resumen Daily Match Alpha (08:00 CL)</b>",
+        f"Run: {run_data.get('status', 'OK')}",
+        f"Inicio UTC: {iso_utc(started_at)}",
+        f"Jobs ejecutados: {len(executed)} | skip: {len(skipped)} | fail: {len(failed)}",
+        "",
+        f"🎯 <b>EV+ detectados</b>: {len(ev_rows)}",
+    ]
+
+    if not ev_rows:
+        lines.append("Sin EV+ nuevos desde el último daily.")
+    else:
+        for idx, row in enumerate(ev_rows, start=1):
+            home = row.get("home_team") or "TBD"
+            away = row.get("away_team") or "TBD"
+            ev = row.get("ev")
+            edge = row.get("edge")
+            lines.append(
+                f"{idx}. {home} vs {away} | {row.get('market_code')}/{row.get('selection_code')}"
+            )
+            lines.append(
+                f"   EV={float(ev):.2%} | Edge={float(edge):.2%}" if ev is not None and edge is not None else "   EV/Edge no disponible"
+            )
+            if row.get("graph_url"):
+                lines.append(f"   Grafico: {row['graph_url']}")
+
+    message = "\n".join(lines)
+    await notify_text(settings.telegram_bot_token, settings.telegram_chat_id, message)
+
+    return {
+        "status": "OK",
+        "job_name": "telegram_daily_summary",
+        "records_processed": len(ev_rows),
+        "pipeline_run_id": run_data.get("pipeline_run_id"),
+        "ev_sent": len(ev_rows),
+    }
+
+
 async def sync_all_leagues_teams_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
     """Weekly: upsert teams for all catalog entries that have API_FOOTBALL external_ids."""
     _ = payload
@@ -914,14 +1060,111 @@ async def sync_all_leagues_teams_job(conn: AsyncConnection, payload: dict[str, A
 
 async def sync_all_leagues_players_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
     """Weekly: upsert players + squad memberships for all catalog entries with API_FOOTBALL."""
-    _ = payload
-    return await sync_players_for_all_leagues(conn)
+    return await sync_players_for_all_leagues(conn, payload)
+
+
+async def sync_all_leagues_match_entities_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Weekly: ingest stadiums/venues + referees from fixture providers across leagues."""
+    return await sync_players_for_all_leagues(
+        conn,
+        {
+            **payload,
+            "only_match_entities": True,
+            "ingest_referees": True,
+            "ingest_venues": True,
+        },
+    )
 
 
 async def sync_all_leagues_fixtures_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
     """Daily: sync fixtures for all catalog entries (multi-league complement to worldcup_daily_refresh)."""
     competition = payload.get("competition")
     return await sync_competition_fixtures(conn, competition)
+
+
+async def validate_sync_coverage_all_leagues_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Post-cron validation by league: teams coverage + min players + roster consistency."""
+    min_players = int(payload.get("min_players_per_team", 11) or 11)
+    return await validate_sync_coverage_for_all_leagues(conn, min_players_per_team=min_players)
+
+
+async def validate_players_identity_all_leagues_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Post-cron validation for player identity consistency (no merge side effects)."""
+    settings = get_settings()
+    validation_payload = {
+        **payload,
+        "max_merge_candidates": int(
+            payload.get(
+                "max_merge_candidates",
+                settings.identity_validation_max_merge_candidates,
+            )
+        ),
+        "max_candidate_ratio": float(
+            payload.get(
+                "max_candidate_ratio",
+                settings.identity_validation_max_candidate_ratio,
+            )
+        ),
+        "max_ambiguous_signatures": int(
+            payload.get(
+                "max_ambiguous_signatures",
+                settings.identity_validation_max_ambiguous_signatures,
+            )
+        ),
+    }
+    return await validate_players_identity_consistency(conn, validation_payload)
+
+
+async def validate_core_entities_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Post-cron validation for teams, referees and venues identity consistency."""
+    settings = get_settings()
+    validation_payload = {
+        **payload,
+        "max_team_duplicates": int(
+            payload.get(
+                "max_team_duplicates",
+                settings.identity_validation_max_team_duplicates,
+            )
+        ),
+        "max_referee_duplicates": int(
+            payload.get(
+                "max_referee_duplicates",
+                settings.identity_validation_max_referee_duplicates,
+            )
+        ),
+        "max_venue_duplicates": int(
+            payload.get(
+                "max_venue_duplicates",
+                settings.identity_validation_max_venue_duplicates,
+            )
+        ),
+    }
+    return await validate_core_entities_identity_consistency(conn, validation_payload)
+
+
+async def reconcile_players_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate and merge players across sources while preserving relationships."""
+    return await reconcile_players_identity(conn, payload)
+
+
+async def reconcile_teams_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate and merge teams across sources while preserving relationships."""
+    return await reconcile_teams_identity(conn, payload)
+
+
+async def reconcile_referees_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate and merge referees across sources while preserving relationships."""
+    return await reconcile_referees_identity(conn, payload)
+
+
+async def reconcile_venues_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate and merge venues across sources while preserving relationships."""
+    return await reconcile_venues_identity(conn, payload)
+
+
+async def news_context_extract_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract structured lineup/injury/suspension context from news bodies and resolve players to local IDs."""
+    return await build_news_context(conn, payload)
 
 
 async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -951,8 +1194,18 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "backtest_walk_forward": backtest_job,
         # Multi-league sync
         "sync_all_leagues_teams": sync_all_leagues_teams_job,
+        "sync_all_leagues_match_entities": sync_all_leagues_match_entities_job,
         "sync_all_leagues_players": sync_all_leagues_players_job,
         "sync_all_leagues_fixtures": sync_all_leagues_fixtures_job,
+        "validate_sync_coverage_all_leagues": validate_sync_coverage_all_leagues_job,
+        "validate_players_identity_all_leagues": validate_players_identity_all_leagues_job,
+        "validate_core_entities_identity": validate_core_entities_identity_job,
+        "reconcile_players_identity": reconcile_players_identity_job,
+        "reconcile_teams_identity": reconcile_teams_identity_job,
+        "reconcile_referees_identity": reconcile_referees_identity_job,
+        "reconcile_venues_identity": reconcile_venues_identity_job,
+        "news_context_extract": news_context_extract_job,
+        "telegram_daily_summary": telegram_daily_summary_job,
     }
     scaffold_jobs = {
         "dataset_builder",

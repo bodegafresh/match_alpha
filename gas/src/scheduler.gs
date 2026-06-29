@@ -28,8 +28,10 @@ var MATCH_ALPHA_CRON_CONFIG = {
   KEEPALIVE_ENABLED:        true,
   DAILY_JOB_ENABLED:        true,
   LIVE_JOB_ENABLED:         true,
+  MORNING_SUMMARY_ENABLED:  true,
   FETCH_TIMEOUT_MS:         25000,
   DAILY_HOUR_UTC:           10,   // hora UTC en que corre el daily (06:00 Chile = 10:00 UTC, UTC-4 invierno)
+  MORNING_SUMMARY_HOUR_UTC: 12,   // 08:00 Chile (UTC-4 invierno)
   // Ventana WC2026 para live orchestration
   WC_START_ISO:             '2026-06-11T00:00:00Z',
   WC_END_ISO:               '2026-07-20T00:00:00Z'
@@ -134,25 +136,68 @@ function runLiveBackendOrchestration() {
 
 /**
  * runWeeklyTeamsSync — corre domingos a las 2 AM UTC.
- * Sincroniza equipos de todas las ligas del catálogo via API-Football.
- * API-Football free tier: ~10 req/día — este job corre UNA VEZ POR SEMANA.
+ * Mantiene el nombre legacy del handler para reutilizar el trigger semanal existente,
+ * pero ejecuta la nueva orquestación de servicio única en backend (solo equipos).
  */
 function runWeeklyTeamsSync() {
   return logBackendCronResult_(
     'runWeeklyTeamsSync',
-    backendFetch_('/api/v1/jobs/sync_all_leagues_teams/run', { method: 'post', payload: { source: 'gas_weekly' } })
+    backendFetch_('/api/v1/jobs/orchestrate/weekly', { method: 'post', payload: { source: 'gas_weekly' } })
   );
 }
 
 /**
- * runWeeklyPlayersSync — corre domingos a las 3 AM UTC (1h después de teams).
- * Sincroniza jugadores/planteles de todas las ligas del catálogo via API-Football.
- * Separado 1h de teams para no agotar el quota de API-Football en un solo burst.
+ * runWeeklyMatchEntitiesSync — corre domingos a las 3 AM UTC.
+ * Sincroniza estadios/referees en un cron separado entre equipos y jugadores.
+ */
+function runWeeklyMatchEntitiesSync() {
+  return logBackendCronResult_(
+    'runWeeklyMatchEntitiesSync',
+    backendFetch_('/api/v1/jobs/orchestrate/weekly-match-entities', { method: 'post', payload: { source: 'gas_weekly_match_entities' } })
+  );
+}
+
+/**
+ * runWeeklyPlayersSync — corre lunes a las 2 AM UTC.
+ * Sincroniza jugadores y reconcilia rosters en un cron separado del de equipos.
  */
 function runWeeklyPlayersSync() {
   return logBackendCronResult_(
     'runWeeklyPlayersSync',
-    backendFetch_('/api/v1/jobs/sync_all_leagues_players/run', { method: 'post', payload: { source: 'gas_weekly' } })
+    backendFetch_('/api/v1/jobs/orchestrate/weekly-players', { method: 'post', payload: { source: 'gas_weekly_players' } })
+  );
+}
+
+/**
+ * runMorningTelegramSummary — trigger diario a las 8:00 Chile.
+ * Envia a Telegram un resumen de la corrida daily previa, priorizando EV+.
+ */
+function runMorningTelegramSummary() {
+  var config = getBackendCronConfig_();
+  if (!config.MORNING_SUMMARY_ENABLED) {
+    return logBackendCronResult_('runMorningTelegramSummary', {
+      ok: false,
+      skipped: true,
+      reason: 'MORNING_SUMMARY_DISABLED'
+    });
+  }
+
+  var nowUtcHour = new Date().getUTCHours();
+  if (nowUtcHour !== config.MORNING_SUMMARY_HOUR_UTC) {
+    return logBackendCronResult_('runMorningTelegramSummary', {
+      ok: false,
+      skipped: true,
+      reason: 'WRONG_HOUR',
+      utc_hour: nowUtcHour
+    });
+  }
+
+  return logBackendCronResult_(
+    'runMorningTelegramSummary',
+    backendFetch_('/api/v1/jobs/telegram_daily_summary/run', {
+      method: 'post',
+      payload: { source: 'gas_morning_summary', ev_limit: 8 }
+    })
   );
 }
 
@@ -216,8 +261,9 @@ function runNewsSyncJob() {
  *   - News:       1 hora (9 AM UTC — 1h antes del daily, para que AI las lea)
  *   - Daily:      1 hora (10 AM UTC = 6 AM Chile, con guard interno de hora+idempotencia)
  *   - Live:       5 min  (actualización frecuente durante partidos WC2026)
- *   - Teams sync: domingo 2 AM UTC (API-Football, free tier ~10 req/día)
- *   - Players sync: domingo 3 AM UTC (1h después de teams para no agotar quota)
+ *   - Weekly orchestration: domingo 2 AM UTC (teams only)
+ *   - Weekly match entities: domingo 3 AM UTC (stadiums/referees)
+ *   - Weekly players orchestration: domingo 4 AM UTC (players + rosters)
  */
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();
@@ -247,21 +293,32 @@ function installMatchAlphaTriggers() {
     .everyMinutes(5)
     .create();
 
-  // Weekly team/player sync — domingos de madrugada UTC para evitar interferir
-  // con el daily (10 AM UTC) y el live (durante partidos). API-Football free tier
-  // permite ~10 req/día → se separan 1h para no agotar en un solo burst.
-  var teamsSync = ScriptApp.newTrigger('runWeeklyTeamsSync')
+  // Weekly orchestration — domingos de madrugada UTC para evitar interferir
+  // con el daily (10 AM UTC) y el live (durante partidos).
+  var weekly = ScriptApp.newTrigger('runWeeklyTeamsSync')
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.SUNDAY)
     .atHour(2)
     .inTimezone('UTC')
     .create();
 
-  var playersSync = ScriptApp.newTrigger('runWeeklyPlayersSync')
+  var weeklyMatchEntities = ScriptApp.newTrigger('runWeeklyMatchEntitiesSync')
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.SUNDAY)
     .atHour(3)
     .inTimezone('UTC')
+    .create();
+
+  var weeklyPlayers = ScriptApp.newTrigger('runWeeklyPlayersSync')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
+    .atHour(4)
+    .inTimezone('UTC')
+    .create();
+
+  var morningSummary = ScriptApp.newTrigger('runMorningTelegramSummary')
+    .timeBased()
+    .everyHours(1)
     .create();
 
   var props = PropertiesService.getScriptProperties();
@@ -269,18 +326,22 @@ function installMatchAlphaTriggers() {
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'NEWS', news.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
-  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC', teamsSync.getUniqueId());
-  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC', playersSync.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC', weekly.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'MATCH_ENTITIES_SYNC', weeklyMatchEntities.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC', weeklyPlayers.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'MORNING_SUMMARY', morningSummary.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM players=domingo-3AM');
+  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM match_entities=domingo-3AM players=domingo-4AM morning_summary=1h@12UTC');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
     news_trigger_id: news.getUniqueId(),
     daily_trigger_id: daily.getUniqueId(),
     live_trigger_id: live.getUniqueId(),
-    teams_sync_trigger_id: teamsSync.getUniqueId(),
-    players_sync_trigger_id: playersSync.getUniqueId()
+    teams_sync_trigger_id: weekly.getUniqueId(),
+    match_entities_sync_trigger_id: weeklyMatchEntities.getUniqueId(),
+    players_sync_trigger_id: weeklyPlayers.getUniqueId(),
+    morning_summary_trigger_id: morningSummary.getUniqueId()
   };
 }
 
@@ -292,6 +353,7 @@ function removeMatchAlphaTriggers() {
     runLiveBackendOrchestration: true,
     runWeeklyTeamsSync: true,
     runWeeklyPlayersSync: true,
+    runMorningTelegramSummary: true,
     checkBackendLatestStatus: true,
     checkBackendHealth: true
   };
@@ -308,6 +370,7 @@ function removeMatchAlphaTriggers() {
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC');
+  props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'MORNING_SUMMARY');
   props.deleteProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC');
 
   return { ok: true, removed: true };

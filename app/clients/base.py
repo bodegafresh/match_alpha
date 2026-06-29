@@ -35,5 +35,8 @@ class HttpClient:
                     return response.json()
                 except (httpx.HTTPStatusError, httpx.RequestError) as exc:
                     last_exc = exc
+                    if attempt < 2:
+                        await asyncio.sleep(min(2 ** attempt, 4))
+                        continue
                     raise
         raise last_exc  # type: ignore[misc]

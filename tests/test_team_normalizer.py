@@ -8,3 +8,9 @@ def test_team_aliases_are_canonical() -> None:
     assert slugify_name("Curaçao") == "curazao"
     assert slugify_name("South Africa") == "sudafrica"
 
+
+def test_cape_verde_aliases_are_canonical() -> None:
+    assert slugify_name("Cape Verde") == "cabo-verde"
+    assert slugify_name("Cape Verde Islands") == "cabo-verde"
+    assert slugify_name("Cabo Verde") == "cabo-verde"
+

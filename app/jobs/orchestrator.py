@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 class OrchestratedJob:
     name: str
     critical: bool = False
+    payload: dict[str, Any] | None = None
     requires_upcoming_matches: bool = False
     requires_predictions: bool = False
     requires_odds: bool = False
@@ -58,6 +59,7 @@ class JobOrchestrator:
             OrchestratedJob("results_settlement", requires_finished_matches=True),
             OrchestratedJob("elo_ratings_update", requires_finished_matches=True),
             OrchestratedJob("feature_snapshot_build", requires_upcoming_matches=True),
+            OrchestratedJob("news_context_extract", requires_upcoming_matches=True),
             OrchestratedJob("model_recompute", requires_upcoming_matches=True),
             OrchestratedJob("ev_decision", requires_predictions=True, requires_odds=False),
             OrchestratedJob("calibration_recompute", requires_finished_matches=True),
@@ -73,7 +75,9 @@ class JobOrchestrator:
     async def live(self) -> dict[str, Any]:
         context = await self._build_context(live=True)
         plan = [
-            OrchestratedJob("worldcup_live_refresh", requires_upcoming_matches=True),
+            # Do not gate live refresh by "upcoming" matches: ESPN can still
+            # publish LIVE/FINAL transitions for matches that just started/ended.
+            OrchestratedJob("worldcup_live_refresh"),
             # odds_refresh is NOT in the live plan — The Odds API free tier is 500 req/month.
             # Running it every 5 min would consume ~8,640 req/month.
             # Odds are refreshed once per day by the daily plan instead.
@@ -81,6 +85,55 @@ class JobOrchestrator:
             OrchestratedJob("qualification_resolver"),
         ]
         return await self._run_plan("live", plan, context)
+
+    async def weekly(self) -> dict[str, Any]:
+        # Weekly maintenance orchestration for multi-league team sync only.
+        context = await self._build_context()
+        plan = [
+            OrchestratedJob("sync_all_leagues_teams"),
+        ]
+        return await self._run_plan("weekly", plan, context)
+
+    async def weekly_players(self) -> dict[str, Any]:
+        # Weekly players/roster reconciliation in a dedicated window.
+        context = await self._build_context()
+        plan = [
+            OrchestratedJob(
+                "sync_all_leagues_players",
+                payload={
+                    "max_runtime_seconds": 210,
+                    "ingest_referees": False,
+                    "ingest_venues": False,
+                    "max_api_football_last_fixtures": 20,
+                    "max_sportmonks_fixture_pages": 1,
+                },
+            ),
+            OrchestratedJob("validate_players_identity_all_leagues", payload={"max_runtime_seconds": 30}),
+            OrchestratedJob("validate_core_entities_identity", payload={"max_runtime_seconds": 30}),
+            OrchestratedJob("validate_sync_coverage_all_leagues"),
+            OrchestratedJob("reconcile_teams_identity", payload={"dry_run": False, "limit_merges": 40, "max_runtime_seconds": 35}),
+            OrchestratedJob("reconcile_referees_identity", payload={"dry_run": False, "limit_merges": 40, "max_runtime_seconds": 25}),
+            OrchestratedJob("reconcile_venues_identity", payload={"dry_run": False, "limit_merges": 40, "max_runtime_seconds": 25}),
+        ]
+        return await self._run_plan("weekly_players", plan, context, max_runtime_seconds=290)
+
+    async def weekly_match_entities(self) -> dict[str, Any]:
+        # Weekly stadiums/referees ingestion in a dedicated window before players.
+        context = await self._build_context()
+        plan = [
+            OrchestratedJob(
+                "sync_all_leagues_match_entities",
+                payload={
+                    "max_runtime_seconds": 250,
+                    "max_api_football_last_fixtures": 20,
+                    "max_sportmonks_fixture_pages": 1,
+                },
+            ),
+            OrchestratedJob("validate_core_entities_identity", payload={"max_runtime_seconds": 30}),
+            OrchestratedJob("reconcile_referees_identity", payload={"dry_run": False, "limit_merges": 40, "max_runtime_seconds": 25}),
+            OrchestratedJob("reconcile_venues_identity", payload={"dry_run": False, "limit_merges": 40, "max_runtime_seconds": 25}),
+        ]
+        return await self._run_plan("weekly_match_entities", plan, context, max_runtime_seconds=290)
 
     async def should_run_job(self, job_name: str, window: str) -> bool:
         # Uses the generated column idempotency_key (migration 010) + index for fast lookup.
@@ -145,8 +198,15 @@ class JobOrchestrator:
         )
         return {"status": "ok", "received": True, "timestamp": iso_utc()}
 
-    async def _run_plan(self, orchestration_name: str, plan: list[OrchestratedJob], context: dict[str, Any]) -> dict[str, Any]:
+    async def _run_plan(
+        self,
+        orchestration_name: str,
+        plan: list[OrchestratedJob],
+        context: dict[str, Any],
+        max_runtime_seconds: int | None = None,
+    ) -> dict[str, Any]:
         window = self._window(orchestration_name)
+        started = perf_counter()
         orchestrator_run_id = await self.obs.start_pipeline(
             f"orchestrate_{orchestration_name}",
             {
@@ -154,6 +214,7 @@ class JobOrchestrator:
                 "context": context,
                 "idempotency_key": f"orchestrate_{orchestration_name}:{window}",
                 "orchestrator_version": ORCHESTRATOR_VERSION,
+                "max_runtime_seconds": max_runtime_seconds,
             },
         )
         executed: list[str] = []
@@ -166,6 +227,9 @@ class JobOrchestrator:
                 return self._orchestration_response("ok", executed, [{"job": orchestration_name, "reason": "LOCKED"}], failed, 0)
 
             for item in plan:
+                if max_runtime_seconds is not None and (perf_counter() - started) >= max_runtime_seconds:
+                    skipped.append({"job": item.name, "reason": "ORCHESTRATION_TIME_BUDGET_EXCEEDED"})
+                    continue
                 reason = await self._skip_reason(item, window, context)
                 if reason:
                     skipped.append({"job": item.name, "reason": reason})
@@ -184,6 +248,7 @@ class JobOrchestrator:
                                     "orchestrator": orchestration_name,
                                     "idempotency_key": f"{item.name}:{window}",
                                     "orchestrator_version": ORCHESTRATOR_VERSION,
+                                    **(item.payload or {}),
                                 },
                             )
                             await sp.commit()

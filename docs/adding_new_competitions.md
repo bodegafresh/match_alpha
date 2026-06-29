@@ -1,38 +1,41 @@
 # Cómo agregar una nueva competición a Match Alpha
 
-Todo el sistema gira en torno a **un único archivo de configuración**:
+Desde junio 2026, la carga de `competitions` y `competition_seasons` es
+**migration-first**.
+
+La fuente de verdad operativa para alta de temporadas es:
 
 ```
-app/competitions/catalog.py
+supabase/migrations/*.sql
 ```
 
-Si defines ahí la competición correctamente, el resto del pipeline (ingesta,
-standings, bracket, EV+, modelo) funciona sin tocar la base de datos
-manualmente.
+El catálogo en código puede seguir existiendo para comportamiento de aplicación,
+pero **no debe ser el mecanismo principal para crear filas en DB** de nuevas
+competiciones o temporadas.
 
 ---
 
 ## Arquitectura: el flujo completo
 
 ```
-catalog.py  ──►  seed_competition_catalog()  ──►  DB (competitions, competition_seasons, competition_stages, competition_groups)
-                                                        │
-                                                        ▼
-                              ingesta ESPN / API_FOOTBALL / SPORTMONKS / FOOTBALL_DATA
-                                                        │
-                                                        ▼
-                              matches + match_participants + standings + tournament_slots
-                                                        │
-                                                        ▼
-                              slot_resolver  →  bracket correcto automáticamente
-                                                        │
-                                                        ▼
-                              feature_snapshots  →  model_predictions  →  betting_decisions  →  EV+
+migration SQL  ──►  DB (competitions, competition_seasons)
+               │
+               ▼
+    ingesta ESPN / API_FOOTBALL / SPORTMONKS / FOOTBALL_DATA
+               │
+               ▼
+    matches + match_participants + standings + tournament_slots
+               │
+               ▼
+    slot_resolver  →  bracket correcto automaticamente
+               │
+               ▼
+    feature_snapshots  →  model_predictions  →  betting_decisions  →  EV+
 ```
 
-**Regla de oro:** Si está bien en `catalog.py` y el `seed` se corrió, no hay nada
-que ajustar en DB. Cualquier ajuste manual que necesites hacer es síntoma de
-un campo faltante en el catálogo.
+**Regla de oro:** nuevas temporadas/competiciones se agregan por migración SQL
+idempotente. Evitar depender de `seed_competition_catalog` para altas en
+producción.
 
 ---
 

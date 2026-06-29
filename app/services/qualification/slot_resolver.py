@@ -64,6 +64,12 @@ class TournamentSlotResolver:
             matrix = FIFAAssignmentMatrix(self.conn)
             matrix_mapping = await matrix.resolve(competition_season_id, qualifying_groups)
 
+        qualified_group_by_team_id = {
+            t["team_id"]: (t.get("group_code") or "").strip().upper()
+            for t in best_thirds
+            if t.get("qualification_status") == "QUALIFIED_BEST_THIRD"
+        }
+
         # Fallback: compute assignment via constraint propagation when DB matrix is absent.
         # Process slots in order of fewest candidates (most constrained first), so groups
         # that appear in only one slot (e.g. group L → d_e_i_j_l) are assigned first.
@@ -75,24 +81,51 @@ class TournamentSlotResolver:
         pending_count = 0
 
         for slot in slots:
-            # Skip BEST_THIRD slots that are already resolved — the draw is final.
-            # Re-resolving them would overwrite the correct assignment with the
-            # greedy fallback whenever fewer than 8 thirds are in the DB.
+            # For already-resolved BEST_THIRD slots:
+            # When official matrix mapping is available, keep only slots already
+            # aligned with that mapping and re-resolve stale/wrong assignments.
+            # Without matrix, avoid overwriting previous resolved draw outcomes.
             if slot.get("slot_type") == "BEST_THIRD" and slot.get("resolved_team_id"):
-                log.debug("slot %s: already resolved, skipping", slot["slot_code"])
-                resolved_count += 1
-                resolutions.append(
-                    SlotResolution(
-                        slot_id=slot["tournament_slot_id"],
-                        slot_code=slot["slot_code"],
-                        slot_label=slot["slot_label"],
-                        resolved_team_id=slot["resolved_team_id"],
-                        status=SLOT_STATUS_RESOLVED,
-                        reason="ALREADY_RESOLVED",
-                        source="existing",
+                if matrix_mapping and slot.get("slot_code") in matrix_mapping:
+                    expected_group = matrix_mapping.get(slot["slot_code"], "").strip().upper()
+                    current_group = qualified_group_by_team_id.get(slot["resolved_team_id"], "")
+                    if current_group != expected_group:
+                        log.info(
+                            "slot %s: stale BEST_THIRD assignment (%s != %s), re-resolving",
+                            slot["slot_code"],
+                            current_group or "?",
+                            expected_group or "?",
+                        )
+                    else:
+                        log.debug("slot %s: already resolved and aligned with matrix", slot["slot_code"])
+                        resolved_count += 1
+                        resolutions.append(
+                            SlotResolution(
+                                slot_id=slot["tournament_slot_id"],
+                                slot_code=slot["slot_code"],
+                                slot_label=slot["slot_label"],
+                                resolved_team_id=slot["resolved_team_id"],
+                                status=SLOT_STATUS_RESOLVED,
+                                reason="ALREADY_RESOLVED",
+                                source="existing",
+                            )
+                        )
+                        continue
+                else:
+                    log.debug("slot %s: already resolved, skipping", slot["slot_code"])
+                    resolved_count += 1
+                    resolutions.append(
+                        SlotResolution(
+                            slot_id=slot["tournament_slot_id"],
+                            slot_code=slot["slot_code"],
+                            slot_label=slot["slot_label"],
+                            resolved_team_id=slot["resolved_team_id"],
+                            status=SLOT_STATUS_RESOLVED,
+                            reason="ALREADY_RESOLVED",
+                            source="existing",
+                        )
                     )
-                )
-                continue
+                    continue
 
             resolution = self._resolve_slot(
                 slot, group_standings, best_thirds, knockout_results, matrix_mapping

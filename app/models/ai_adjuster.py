@@ -278,6 +278,31 @@ async def _fetch_news(conn: AsyncConnection, match_id: str) -> list[str]:
         return []
 
 
+async def _fetch_structured_news_context(conn: AsyncConnection, match_id: str) -> dict[str, Any] | None:
+    """Read latest structured news context extracted from full article bodies."""
+    try:
+        row = await conn.execute(
+            text(
+                """
+                SELECT context_payload
+                FROM match_news_context_snapshots
+                WHERE match_id = cast(:mid as uuid)
+                ORDER BY context_date DESC, created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"mid": match_id},
+        )
+        r = row.fetchone()
+        if not r:
+            return None
+        payload = r[0] or {}
+        return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        log.debug("structured news context fetch failed: %s", exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
@@ -290,6 +315,7 @@ def _build_prompt(
     features: dict,
     weather: dict,
     news: list[str],
+    structured_news_context: dict[str, Any] | None,
 ) -> list[dict]:
     home = match.get("home_team", "?")
     away = match.get("away_team", "?")
@@ -343,8 +369,51 @@ def _build_prompt(
             f"Rain {weather.get('precip_mm', 0)} mm"
         )
 
-    # Format news
+    # Format headline news fallback
     news_str = "\n".join(news) if news else "No recent news available"
+
+    # Format structured context extracted from full article bodies.
+    structured_ctx_str = "No structured news context available"
+    if structured_news_context:
+        try:
+            sig = structured_news_context.get("signals", {})
+            quality = structured_news_context.get("quality", {})
+            impact = structured_news_context.get("team_impact_summary", {})
+            lineup_n = len(sig.get("lineups", []) or [])
+            injury_n = len(sig.get("injuries", []) or [])
+            susp_n = len(sig.get("suspensions", []) or [])
+            resolved_n = int(quality.get("resolved_player_mentions") or 0)
+
+            def _fmt_team_impact(side: str) -> str:
+                t = impact.get(side, {}) or {}
+                top = t.get("key_absences", []) or []
+                top_lines = []
+                for item in top[:4]:
+                    top_lines.append(
+                        (
+                            f"{item.get('player_name')}"
+                            f" ({item.get('reason_type')}, impact={item.get('impact_score', 0):.2f}, "
+                            f"min365={item.get('minutes_365d', 0):.0f}, "
+                            f"g+a365={(item.get('goals_365d', 0) + item.get('assists_365d', 0)):.0f})"
+                        )
+                    )
+                top_str = "; ".join(top_lines) if top_lines else "none"
+                return (
+                    f"{side}: injury_count={t.get('injury_count', 0)}, "
+                    f"suspension_count={t.get('suspension_count', 0)}, "
+                    f"key_absence_impact_score={t.get('key_absence_impact_score', 0):.3f}, "
+                    f"top_absences={top_str}"
+                )
+
+            structured_ctx_str = (
+                f"articles_processed={quality.get('articles_processed', 0)}, "
+                f"resolved_player_mentions={resolved_n}, "
+                f"lineups={lineup_n}, injuries={injury_n}, suspensions={susp_n}\n"
+                f"team_impact_summary:\n{_fmt_team_impact('HOME')}\n{_fmt_team_impact('AWAY')}\n"
+                f"context_json={json.dumps(structured_news_context, ensure_ascii=False)[:9000]}"
+            )
+        except Exception:
+            structured_ctx_str = "Structured context exists but could not be serialized"
 
     system = (
         "You are an expert FIFA World Cup 2026 football analyst and betting model adjuster. "
@@ -378,6 +447,9 @@ Away ({away}): {p_away}%
 
 ## Recent News (last 8 headlines)
 {news_str}
+
+## Structured News Context (from full article bodies)
+{structured_ctx_str}
 
 ---
 ## Your Task
@@ -570,8 +642,9 @@ async def adjust_predictions_with_ai(
 
     weather = await _fetch_weather(conn, match_id, match.get("venue_city"), match.get("venue_country"), match.get("kickoff_at"))
     news = await _fetch_news(conn, match_id)
+    structured_news_context = await _fetch_structured_news_context(conn, match_id)
 
-    messages = _build_prompt(match, raw_probs, odds, standings, features, weather, news)
+    messages = _build_prompt(match, raw_probs, odds, standings, features, weather, news, structured_news_context)
     ai_result = await _call_openai(messages, raw_probs)
 
     if not ai_result:
@@ -594,6 +667,7 @@ async def adjust_predictions_with_ai(
         },
         "model": settings.openai_model,
         "adjusted_at": as_of.isoformat(),
+        "structured_news_context_used": bool(structured_news_context),
     }
 
     rows_updated = await _update_calibrated_probabilities(

@@ -83,3 +83,12 @@ async def notify_group_result(
         f"4° {eliminated} → Eliminado"
     )
     await _send(bot_token, chat_id, text)
+
+
+async def notify_text(
+    bot_token: str,
+    chat_id: str,
+    text: str,
+) -> None:
+    """Send a plain Telegram message (HTML parse mode enabled)."""
+    await _send(bot_token, chat_id, text)
