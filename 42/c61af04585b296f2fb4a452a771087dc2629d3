@@ -1,0 +1,23 @@
+tests/test_player_identity.py
+  s_5464458db59e8d::t_473f6515c7defb 12-13,21-25
+app/normalization/player_dedup.py
+  s_5464458db59e8d::t_61b3a05533d8e6 114-118,137-138,151-175,208,211-215,246,614,620,623-627,641,676
+app/normalization/player_identity.py
+  s_5464458db59e8d::t_950ffe894c6a38 7-26,29-30,32,46-47,49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "42c61af04585b296f2fb4a452a771087dc2629d3",
+  "prompts": {},
+  "sessions": {
+    "s_5464458db59e8d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "07c90802-5b7f-4a48-9c11-612e4c1d71c7",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
