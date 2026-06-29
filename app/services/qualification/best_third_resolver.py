@@ -67,19 +67,23 @@ class BestThirdPlaceResolver:
 
         for i, entry in enumerate(ranked):
             entry.rank = i + 1
+            tie_pending = entry.qualification_status == PENDING_TIEBREAKER
             if i < n_qualifiers:
-                # Check for unresolvable tie at the cutoff boundary
-                if entry.qualification_status == PENDING_TIEBREAKER:
-                    pending.append(entry)
-                else:
-                    entry.qualification_status = QUALIFIED_BEST_THIRD
-                    qualified.append(entry)
+                # Deterministic draw fallback: when all criteria are tied,
+                # keep sorted order and still promote top-N so bracket can resolve.
+                entry.qualification_status = QUALIFIED_BEST_THIRD
+                qualified.append(entry)
             else:
-                if entry.qualification_status == PENDING_TIEBREAKER:
-                    pending.append(entry)
-                else:
-                    entry.qualification_status = ELIMINATED
-                    eliminated.append(entry)
+                entry.qualification_status = ELIMINATED
+                eliminated.append(entry)
+
+            if tie_pending:
+                pending.append(entry)
+                log.warning(
+                    "best_third_resolver: deterministic tiebreak applied for %s (rank=%s)",
+                    entry.team_name,
+                    entry.rank,
+                )
 
         await self._update_standings(competition_season_id, ranked)
 

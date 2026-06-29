@@ -249,6 +249,16 @@ class TournamentSlotResolver:
                     source="best_thirds",
                 )
 
+            # Matrix exists for the current third-place combination, but this slot
+            # is not active in that combination. Keep it pending (do not use greedy fallback).
+            if matrix_mapping and slot_code not in matrix_mapping:
+                return SlotResolution(
+                    slot_id=slot_id, slot_code=slot_code, slot_label=slot_label,
+                    resolved_team_id=None, status=SLOT_STATUS_PENDING_BEST_THIRD,
+                    reason="slot_not_active_for_current_combination",
+                    source="best_thirds",
+                )
+
             # Last resort: greedy fallback via allowed_groups (only when no matrix at all)
             allowed_groups = slot.get("metadata", {}).get("allowed_groups", [])
             team = self._find_best_third(best_thirds, allowed_groups)
