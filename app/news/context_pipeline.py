@@ -622,14 +622,15 @@ async def _upcoming_match_ids(conn: AsyncConnection, limit: int = 24) -> list[st
     rows = await conn.execute(
         text(
             """
-            SELECT DISTINCT n.match_id::text
+            SELECT n.match_id::text, MIN(m.kickoff_at) AS next_kickoff_at
             FROM news_items n
             JOIN matches m ON m.match_id = n.match_id
             WHERE n.match_id IS NOT NULL
               AND m.kickoff_at >= now() - interval '8 hours'
               AND m.kickoff_at <= now() + interval '72 hours'
               AND m.status IN ('SCHEDULED', 'LIVE')
-            ORDER BY m.kickoff_at ASC
+            GROUP BY n.match_id
+            ORDER BY next_kickoff_at ASC
             LIMIT :lim
             """
         ),

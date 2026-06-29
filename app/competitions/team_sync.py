@@ -216,6 +216,30 @@ async def _resolve_or_create_team(
         )
         team_id = row.scalar_one_or_none()
 
+        # 2.1) Relaxed canonical identity by normalized_name + country_code.
+        # This avoids duplicates when providers disagree on team_type for the same national side.
+        if not team_id and country_code:
+                row = await conn.execute(
+                        text(
+                                """
+                                SELECT team_id::text
+                                FROM teams
+                                WHERE normalized_name = :normalized_name
+                                    AND country_code = :country_code
+                                ORDER BY
+                                    CASE WHEN team_type = cast(:team_type as team_type) THEN 0 ELSE 1 END,
+                                    updated_at DESC
+                                LIMIT 1
+                                """
+                        ),
+                        {
+                                "normalized_name": _norm(display_name),
+                                "country_code": country_code,
+                                "team_type": team_type,
+                        },
+                )
+                team_id = row.scalar_one_or_none()
+
     # 3) Alias-based match.
     if not team_id:
         row = await conn.execute(
@@ -236,6 +260,30 @@ async def _resolve_or_create_team(
             },
         )
         team_id = row.scalar_one_or_none()
+
+        # 3.1) Relaxed alias-based match with country scope, regardless of team_type.
+        if not team_id and country_code:
+                row = await conn.execute(
+                        text(
+                                """
+                                SELECT ta.team_id::text
+                                FROM team_aliases ta
+                                JOIN teams t ON t.team_id = ta.team_id
+                                WHERE ta.normalized_alias = :normalized_alias
+                                    AND t.country_code = :country_code
+                                ORDER BY
+                                    CASE WHEN t.team_type = cast(:team_type as team_type) THEN 0 ELSE 1 END,
+                                    ta.updated_at DESC
+                                LIMIT 1
+                                """
+                        ),
+                        {
+                                "normalized_alias": _norm(display_name),
+                                "country_code": country_code,
+                                "team_type": team_type,
+                        },
+                )
+                team_id = row.scalar_one_or_none()
 
     # 4) Create if unresolved.
     if not team_id:
