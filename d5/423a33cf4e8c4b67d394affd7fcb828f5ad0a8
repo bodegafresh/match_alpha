@@ -1,0 +1,19 @@
+app/api/routes/web.py
+  s_470526d6dc3738::t_a21fef75a4c10f 2,41-43,81-146,257,264-265,282,313-314,534-536,546-547,567-569,583,585,616-622,625,639,660-673,706-713,716,771-775,778,786-792,795,799,801-806,915-921,924,934,936,954-959
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "d5423a33cf4e8c4b67d394affd7fcb828f5ad0a8",
+  "prompts": {},
+  "sessions": {
+    "s_470526d6dc3738": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "527f0604-de42-4674-8592-6b91fd97cdfc",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
