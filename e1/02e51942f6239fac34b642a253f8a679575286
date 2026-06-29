@@ -1,0 +1,27 @@
+app/db/repositories/published.py
+  s_470526d6dc3738::t_36f6ac75fa7eac 98,197-210,212,214-253,256-264,266,270-291,299,302-325
+  s_470526d6dc3738::t_cfa13698542e51 95-97
+app/competitions/team_sync.py
+  s_470526d6dc3738::t_2d235bb1b5673d 20,471-472,1581-1582
+tests/test_team_sync_seeding.py
+  s_470526d6dc3738::t_82eb5fc42bca36 1-12,14-161
+  s_470526d6dc3738::t_59e64008306c89 13
+app/api/routes/quant.py
+  s_470526d6dc3738::t_ebba5270be1939 18-24,29-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.4",
+  "base_commit_sha": "e102e51942f6239fac34b642a253f8a679575286",
+  "prompts": {},
+  "sessions": {
+    "s_470526d6dc3738": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "527f0604-de42-4674-8592-6b91fd97cdfc",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
