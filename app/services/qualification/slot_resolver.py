@@ -96,6 +96,9 @@ class TournamentSlotResolver:
                             current_group or "?",
                             expected_group or "?",
                         )
+                        await self._clear_slot(slot)
+                        await self._clear_match_participants(slot)
+                        slot["resolved_team_id"] = None
                     else:
                         log.debug("slot %s: already resolved and aligned with matrix", slot["slot_code"])
                         resolved_count += 1
@@ -111,6 +114,16 @@ class TournamentSlotResolver:
                             )
                         )
                         continue
+                elif matrix_mapping:
+                    # Slot not part of the current qualified-third combination.
+                    # It must remain unresolved until its group combination appears.
+                    log.info(
+                        "slot %s: stale BEST_THIRD assignment (slot not in current matrix), clearing",
+                        slot["slot_code"],
+                    )
+                    await self._clear_slot(slot)
+                    await self._clear_match_participants(slot)
+                    slot["resolved_team_id"] = None
                 else:
                     log.debug("slot %s: already resolved, skipping", slot["slot_code"])
                     resolved_count += 1
@@ -444,6 +457,36 @@ class TournamentSlotResolver:
             """),
             {
                 "tid": team_id,
+                "now": utc_now(),
+                "slot_id": slot["tournament_slot_id"],
+            },
+        )
+
+    async def _clear_slot(self, slot: dict) -> None:
+        await self.conn.execute(
+            text("""
+                UPDATE tournament_slots
+                SET resolved_team_id = NULL,
+                    resolved_at      = NULL,
+                    updated_at       = :now
+                WHERE tournament_slot_id = cast(:slot_id as uuid)
+            """),
+            {
+                "now": utc_now(),
+                "slot_id": slot["tournament_slot_id"],
+            },
+        )
+
+    async def _clear_match_participants(self, slot: dict) -> None:
+        await self.conn.execute(
+            text("""
+                UPDATE match_participants
+                SET team_id          = NULL,
+                    participant_role  = 'SLOT',
+                    updated_at        = :now
+                WHERE tournament_slot_id = cast(:slot_id as uuid)
+            """),
+            {
                 "now": utc_now(),
                 "slot_id": slot["tournament_slot_id"],
             },
