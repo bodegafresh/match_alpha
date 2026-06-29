@@ -53,6 +53,7 @@ class JobOrchestrator:
         plan = [
             OrchestratedJob("worldcup_daily_refresh", critical=True),
             OrchestratedJob("sync_all_leagues_fixtures"),   # multi-league fixture sync
+            OrchestratedJob("finished_match_stats_refresh", payload={"days_back": 1}, requires_finished_matches=True),
             OrchestratedJob("standings_refresh"),
             OrchestratedJob("qualification_resolver"),
             OrchestratedJob("odds_refresh", requires_upcoming_matches=True),
@@ -227,6 +228,7 @@ class JobOrchestrator:
                 return self._orchestration_response("ok", executed, [{"job": orchestration_name, "reason": "LOCKED"}], failed, 0)
 
             for item in plan:
+                context = await self._refresh_context_flags(item, context)
                 if max_runtime_seconds is not None and (perf_counter() - started) >= max_runtime_seconds:
                     skipped.append({"job": item.name, "reason": "ORCHESTRATION_TIME_BUDGET_EXCEEDED"})
                     continue
@@ -309,6 +311,24 @@ class JobOrchestrator:
         if item.requires_odds and not context["has_odds"]:
             return "NO_ODDS"
         return None
+
+    async def _refresh_context_flags(self, item: OrchestratedJob, context: dict[str, Any]) -> dict[str, Any]:
+        if not (
+            item.requires_upcoming_matches
+            or item.requires_finished_matches
+            or item.requires_predictions
+            or item.requires_odds
+        ):
+            return context
+
+        refreshed = await self._build_context(live=bool(context.get("live")))
+        return {
+            **context,
+            "has_upcoming_matches": bool(refreshed.get("has_upcoming_matches")),
+            "has_finished_matches": bool(refreshed.get("has_finished_matches")),
+            "has_predictions": bool(refreshed.get("has_predictions")),
+            "has_odds": bool(refreshed.get("has_odds")),
+        }
 
     async def _build_context(self, live: bool = False) -> dict[str, Any]:
         await self._database_ping()

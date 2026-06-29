@@ -21,6 +21,7 @@ from app.competitions.team_sync import (
     sync_teams_for_all_leagues,
     validate_sync_coverage_for_all_leagues,
 )
+from app.competitions.finished_match_stats import sync_finished_match_stats
 from app.db.repositories.betting import BettingRepository
 from app.db.repositories.observability import ObservabilityRepository
 from app.decision.decision_engine import evaluate_decision
@@ -153,6 +154,7 @@ async def results_settlement_job(conn: AsyncConnection, payload: dict[str, Any])
     return {
         "status": result["status"],
         "job_name": "results_settlement",
+        "pending_candidates": result["pending_candidates"],
         "records_processed": result["settled"],
         "skipped_no_resolver": result["skipped_no_resolver"],
         "errors": result["errors"],
@@ -1082,6 +1084,11 @@ async def sync_all_leagues_fixtures_job(conn: AsyncConnection, payload: dict[str
     return await sync_competition_fixtures(conn, competition)
 
 
+async def finished_match_stats_refresh_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Daily: refresh detailed stats for FINISHED matches (default: yesterday) using non-ESPN sources."""
+    return await sync_finished_match_stats(conn, payload)
+
+
 async def validate_sync_coverage_all_leagues_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
     """Post-cron validation by league: teams coverage + min players + roster consistency."""
     min_players = int(payload.get("min_players_per_team", 11) or 11)
@@ -1197,6 +1204,7 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "sync_all_leagues_match_entities": sync_all_leagues_match_entities_job,
         "sync_all_leagues_players": sync_all_leagues_players_job,
         "sync_all_leagues_fixtures": sync_all_leagues_fixtures_job,
+        "finished_match_stats_refresh": finished_match_stats_refresh_job,
         "validate_sync_coverage_all_leagues": validate_sync_coverage_all_leagues_job,
         "validate_players_identity_all_leagues": validate_players_identity_all_leagues_job,
         "validate_core_entities_identity": validate_core_entities_identity_job,

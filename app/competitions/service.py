@@ -550,7 +550,8 @@ def _normalize_espn_event(event: dict[str, Any]) -> dict[str, Any]:
     competitors = competition.get("competitors") or []
     home = next((item for item in competitors if str(item.get("homeAway", "")).lower() == "home"), competitors[0] if competitors else {})
     away = next((item for item in competitors if str(item.get("homeAway", "")).lower() == "away"), competitors[1] if len(competitors) > 1 else {})
-    status_type = ((competition.get("status") or event.get("status") or {}).get("type")) or {}
+    status_payload = competition.get("status") or event.get("status") or {}
+    status_type = status_payload.get("type") or {}
     venue = competition.get("venue") or {}
     address = venue.get("address") or {}
     stage_text = (
@@ -566,13 +567,13 @@ def _normalize_espn_event(event: dict[str, Any]) -> dict[str, Any]:
         "source_match_id": str(event.get("id") or ""),
         "source_match_name": event.get("name") or event.get("shortName") or "",
         "kickoff_at": event.get("date") or competition.get("date"),
-        "status": _normalize_espn_status(status_type),
+        "status": _normalize_espn_status(status_payload, status_type),
         "stage_code": _normalize_stage_code(stage_text),
         "group_code": _normalize_group_code(group_text),
         "home": _normalize_espn_team(home),
         "away": _normalize_espn_team(away),
-        "home_score": _score(home.get("score")),
-        "away_score": _score(away.get("score")),
+        "home_score": _espn_competitor_total_score(home),
+        "away_score": _espn_competitor_total_score(away),
         "venue": {
             "source_venue_id": str(venue.get("id") or ""),
             "display_name": venue.get("fullName") or venue.get("name"),
@@ -808,17 +809,52 @@ def _normalize_football_data_team(team: dict[str, Any]) -> dict[str, Any]:
     return {"display_name": team.get("name") or team.get("shortName") or team.get("tla") or "", "source_team_id": str(team.get("id") or ""), "payload": team}
 
 
-def _normalize_espn_status(status_type: dict[str, Any]) -> str:
-    name = str(status_type.get("name") or status_type.get("state") or status_type.get("description") or "").upper()
-    if status_type.get("completed") or "FINAL" in name or name == "STATUS_FINAL":
+def _normalize_espn_status(status: dict[str, Any], status_type: dict[str, Any] | None = None) -> str:
+    status_type = status_type or (status.get("type") or {})
+    fields = [
+        status.get("name"),
+        status.get("state"),
+        status.get("description"),
+        status.get("detail"),
+        status.get("shortDetail"),
+        status_type.get("name"),
+        status_type.get("state"),
+        status_type.get("description"),
+        status_type.get("detail"),
+        status_type.get("shortDetail"),
+    ]
+    joined = " ".join(str(value) for value in fields if value).upper()
+
+    if status.get("completed") or status_type.get("completed"):
         return "FINISHED"
-    if "IN_PROGRESS" in name or "HALFTIME" in name:
+    if "FINAL" in joined or "STATUS_FINAL" in joined:
+        return "FINISHED"
+    if any(marker in joined for marker in ("IN_PROGRESS", "IN PROGRESS", "HALFTIME", "HALF TIME", "STATUS_HALFTIME", "LIVE")):
         return "LIVE"
-    if "POSTPONED" in name:
+    if "POSTPONED" in joined:
         return "POSTPONED"
-    if "CANCELED" in name or "CANCELLED" in name:
+    if "CANCELED" in joined or "CANCELLED" in joined:
         return "CANCELLED"
     return "SCHEDULED"
+
+
+def _espn_competitor_total_score(competitor: dict[str, Any]) -> int | None:
+    score = _score(competitor.get("score"))
+    if score is not None:
+        return score
+
+    linescores = competitor.get("linescores") or []
+    running_total = 0
+    found_any = False
+    for item in linescores:
+        period_score = _score(item.get("value") if isinstance(item, dict) else None)
+        if period_score is None and isinstance(item, dict):
+            period_score = _score(item.get("displayValue") or item.get("score"))
+        if period_score is None:
+            continue
+        running_total += period_score
+        found_any = True
+    return running_total if found_any else None
 
 
 def _normalize_football_data_status(status: Any) -> str:

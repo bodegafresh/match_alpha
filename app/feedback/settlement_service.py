@@ -82,6 +82,7 @@ async def settle_pending_decisions(conn: AsyncConnection) -> dict[str, Any]:
     Returns summary: {settled, skipped_no_resolver, errors}.
     """
     decisions = await _get_pending_decisions(conn)
+    pending_candidates = len(decisions)
     settled = 0
     skipped = 0
     errors = 0
@@ -114,6 +115,7 @@ async def settle_pending_decisions(conn: AsyncConnection) -> dict[str, Any]:
 
     return {
         "status": "OK" if errors == 0 else "WARN",
+        "pending_candidates": pending_candidates,
         "settled": settled,
         "skipped_no_resolver": skipped,
         "errors": errors,
