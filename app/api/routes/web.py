@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -37,6 +38,9 @@ SPORTING_ASSOCIATION_FLAGS = {
     "irlanda-del-norte": {"fifa_code": "NIR", "flag_emoji": "🏴󠁧󠁢󠁮󠁩󠁲󠁿", "flag_code": "NIR"},
 }
 
+_SUPPORTED_LANGS = {"es", "en"}
+_SPANISH_TIMEZONES = {"America/Santiago", "America/Punta_Arenas"}
+
 
 def _serialize(value: Any) -> Any:
     if hasattr(value, "isoformat"):
@@ -72,6 +76,72 @@ def _to_datetime(value: Any) -> datetime | None:
 
 def _slugish(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _normalize_lang(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = str(value).strip().lower()
+    if not cleaned:
+        return None
+    base = cleaned.split(",", 1)[0].split("-", 1)[0].split("_", 1)[0]
+    return base if base in _SUPPORTED_LANGS else None
+
+
+def _lang_from_accept_language(value: str | None) -> str | None:
+    if not value:
+        return None
+    for token in value.split(","):
+        lang = _normalize_lang(token.split(";", 1)[0])
+        if lang:
+            return lang
+    return None
+
+
+def _lang_from_timezone(value: str | None) -> str | None:
+    if not value:
+        return None
+    tz = str(value).strip()
+    if tz in _SPANISH_TIMEZONES:
+        return "es"
+    return None
+
+
+def _resolve_lang(lang: str | None, timezone: str | None, accept_language: str | None) -> str:
+    return (
+        _normalize_lang(lang)
+        or _lang_from_accept_language(accept_language)
+        or _lang_from_timezone(timezone)
+        or "en"
+    )
+
+
+def _localized_team_name(default_name: Any, metadata: Any, lang: str) -> str:
+    names = _as_dict(_as_dict(metadata).get("names"))
+    fallbacks: list[str] = []
+    if lang:
+        fallbacks.append(lang)
+    if lang != "en":
+        fallbacks.append("en")
+    if lang != "es":
+        fallbacks.append("es")
+    for key in fallbacks:
+        value = names.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(default_name or "Por definir")
 
 
 def _normalize_stage_code(row: dict[str, Any]) -> str:
@@ -184,14 +254,15 @@ def _team_flag_from_fields(slug: Any, name: Any, country_code: Any, country_flag
     return _sporting_flag(row, "team")
 
 
-def _team_from_match_row(row: dict[str, Any], side: str) -> dict[str, Any] | None:
+def _team_from_match_row(row: dict[str, Any], side: str, lang: str = "en") -> dict[str, Any] | None:
     team_id = row.get(f"{side}_team_id")
     slot_label = _slot_label(row.get(f"{side}_slot_label"))
     slot_code = row.get(f"{side}_slot_code")
     if not team_id and not slot_label:
         return None
     flags = _sporting_flag(row, side)
-    display_name = row.get(f"{side}_team_name") or slot_label or "Por definir"
+    metadata = row.get(f"{side}_team_metadata")
+    display_name = _localized_team_name(row.get(f"{side}_team_name"), metadata, lang) if team_id else (slot_label or "Por definir")
     return {
         "team_id": team_id,
         "slug": row.get(f"{side}_team_slug") or slot_code,
@@ -208,7 +279,7 @@ def _team_from_match_row(row: dict[str, Any], side: str) -> dict[str, Any] | Non
     }
 
 
-def _match_from_row(row: dict[str, Any]) -> dict[str, Any]:
+def _match_from_row(row: dict[str, Any], lang: str = "en") -> dict[str, Any]:
     serialized = _serialize_row(row)
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     weather = metadata.get("weather") or metadata.get("weather_snapshot") if isinstance(metadata, dict) else None
@@ -239,8 +310,8 @@ def _match_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "group_name": serialized.get("group_name"),
         "group_label": group_label,
         "group_order": serialized.get("group_order"),
-        "home": _team_from_match_row(row, "home"),
-        "away": _team_from_match_row(row, "away"),
+        "home": _team_from_match_row(row, "home", lang=lang),
+        "away": _team_from_match_row(row, "away", lang=lang),
         "venue": {
             "venue_id": serialized.get("venue_id"),
             "slug": serialized.get("venue_slug"),
@@ -460,6 +531,9 @@ async def web_matches(
     season: str | None = None,
     kickoff_from: str | None = None,
     kickoff_to: str | None = None,
+    lang: str | None = Query(default=None),
+    timezone: str | None = Query(default=None),
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
     conn: AsyncConnection = Depends(get_connection),
 ) -> dict:
     settings = get_settings()
@@ -469,7 +543,8 @@ async def web_matches(
         _parse_utc_datetime(kickoff_from),
         _parse_utc_datetime(kickoff_to),
     )
-    matches = await _enrich_weather([_match_from_row(row) for row in rows], conn=conn)
+    preferred_lang = _resolve_lang(lang, timezone, accept_language)
+    matches = await _enrich_weather([_match_from_row(row, lang=preferred_lang) for row in rows], conn=conn)
     data = {
         "season": {"slug": season or settings.default_season_slug},
         "matches": matches,
@@ -489,6 +564,9 @@ async def web_matches_overview(
     tomorrow_to: str | None = None,
     upcoming_from: str | None = None,
     upcoming_to: str | None = None,
+    lang: str | None = Query(default=None),
+    timezone: str | None = Query(default=None),
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
     weather_refresh_limit: int = Query(default=8, ge=0, le=20),
     conn: AsyncConnection = Depends(get_connection),
 ) -> dict:
@@ -502,8 +580,9 @@ async def web_matches_overview(
     kickoff_from = min(bounds) if bounds else None
     kickoff_to = max(bounds) if bounds else None
     repo = PublishedRepository(conn)
+    preferred_lang = _resolve_lang(lang, timezone, accept_language)
     rows = await _enrich_weather(
-        [_match_from_row(row) for row in await repo.match_schedule(season_slug, kickoff_from, kickoff_to)],
+        [_match_from_row(row, lang=preferred_lang) for row in await repo.match_schedule(season_slug, kickoff_from, kickoff_to)],
         conn=conn,
         limit=weather_refresh_limit,
     )
@@ -534,9 +613,16 @@ async def web_matches_overview(
 
 
 @router.get("/standings")
-async def web_standings(season: str | None = None, conn: AsyncConnection = Depends(get_connection)) -> dict:
+async def web_standings(
+    season: str | None = None,
+    lang: str | None = Query(default=None),
+    timezone: str | None = Query(default=None),
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
     settings = get_settings()
     season_slug = season or settings.default_season_slug
+    preferred_lang = _resolve_lang(lang, timezone, accept_language)
     repo = PublishedRepository(conn)
     rows = await repo.standings_groups(season_slug)
     grouped: dict[str, dict[str, Any]] = {}
@@ -550,6 +636,7 @@ async def web_standings(season: str | None = None, conn: AsyncConnection = Depen
             row.get("team_metadata"),
         )
         row = {**row, "flag_emoji": flags.get("flag_emoji"), "fifa_code": flags.get("fifa_code"), "flag_code": flags.get("flag_code")}
+        row["team_name"] = _localized_team_name(row.get("team_name"), row.get("team_metadata"), preferred_lang)
         group_id = row["group_id"]
         grouped.setdefault(
             group_id,
@@ -570,8 +657,20 @@ async def web_standings(season: str | None = None, conn: AsyncConnection = Depen
 
 
 @router.get("/teams")
-async def web_teams(season: str | None = None, conn: AsyncConnection = Depends(get_connection)) -> dict:
-    standings_response = await web_standings(season, conn)
+async def web_teams(
+    season: str | None = None,
+    lang: str | None = Query(default=None),
+    timezone: str | None = Query(default=None),
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
+    standings_response = await web_standings(
+        season=season,
+        lang=lang,
+        timezone=timezone,
+        accept_language=accept_language,
+        conn=conn,
+    )
     standings = standings_response["data"]
     teams = []
     for group in standings["groups"]:
@@ -604,9 +703,17 @@ async def web_teams(season: str | None = None, conn: AsyncConnection = Depends(g
 
 
 @router.get("/team-detail")
-async def web_team_detail(team_slug: str = Query(...), season: str | None = None, conn: AsyncConnection = Depends(get_connection)) -> dict:
+async def web_team_detail(
+    team_slug: str = Query(...),
+    season: str | None = None,
+    lang: str | None = Query(default=None),
+    timezone: str | None = Query(default=None),
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
     repo = PublishedRepository(conn)
     season_slug = season or get_settings().default_season_slug
+    preferred_lang = _resolve_lang(lang, timezone, accept_language)
     team = await repo.fetch_one(
         """
         select t.*, c.flag_emoji, c.fifa_code as country_fifa_code
@@ -661,10 +768,14 @@ async def web_team_detail(team_slug: str = Query(...), season: str | None = None
         team.get("country_fifa_code"),
         team.get("metadata"),
     )
-    team_payload = {**_serialize_row(team), **flags}
+    team_payload = {
+        **_serialize_row(team),
+        **flags,
+        "display_name": _localized_team_name(team.get("display_name"), team.get("metadata"), preferred_lang),
+    }
     data = {
         "team": team_payload,
-        "matches": [_match_from_row(r) for r in matches],  # already filtered by team via SQL
+        "matches": [_match_from_row(r, lang=preferred_lang) for r in matches],  # already filtered by team via SQL
         "roster": [_serialize_row(r) for r in roster],
         "generated_at": iso_utc(),
     }
@@ -672,15 +783,27 @@ async def web_team_detail(team_slug: str = Query(...), season: str | None = None
 
 
 @router.get("/knockout")
-async def web_knockout(season: str | None = None, conn: AsyncConnection = Depends(get_connection)) -> dict:
+async def web_knockout(
+    season: str | None = None,
+    lang: str | None = Query(default=None),
+    timezone: str | None = Query(default=None),
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
     repo = PublishedRepository(conn)
     season_slug = season or get_settings().default_season_slug
+    preferred_lang = _resolve_lang(lang, timezone, accept_language)
     rows = await repo.match_schedule_knockout(season_slug)
     by_round: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        match = _match_from_row(row)
+        match = _match_from_row(row, lang=preferred_lang)
         by_round[str(match["stage_code"])].append(match)
-    data = {"season": {"slug": season_slug}, "rounds": dict(by_round), "matches": [_match_from_row(r) for r in rows], "generated_at": iso_utc()}
+    data = {
+        "season": {"slug": season_slug},
+        "rounds": dict(by_round),
+        "matches": [_match_from_row(r, lang=preferred_lang) for r in rows],
+        "generated_at": iso_utc(),
+    }
     return {"ok": True, "data": data}
 
 
@@ -789,9 +912,16 @@ async def news_ingest(
 # ---------------------------------------------------------------------------
 
 @router.get("/news")
-async def web_news(season: str | None = None, conn: AsyncConnection = Depends(get_connection)) -> dict:
+async def web_news(
+    season: str | None = None,
+    lang: str | None = Query(default=None),
+    timezone: str | None = Query(default=None),
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
     """Today's matches with team names, AI context flag, and cached news from news_items."""
     season_slug = season or get_settings().default_season_slug
+    preferred_lang = _resolve_lang(lang, timezone, accept_language)
 
     rows = await conn.execute(
         text("""
@@ -801,7 +931,9 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
               m.status,
               cs.stage_code,
               home_t.display_name AS home_team,
+              home_t.metadata AS home_team_metadata,
               away_t.display_name AS away_team,
+              away_t.metadata AS away_team_metadata,
               m.home_score,
               m.away_score
             FROM matches m
@@ -819,7 +951,12 @@ async def web_news(season: str | None = None, conn: AsyncConnection = Depends(ge
         """),
         {"season": season_slug},
     )
-    today_matches = [dict(r._mapping) for r in rows]
+    today_matches = []
+    for r in rows:
+        item = dict(r._mapping)
+        item["home_team"] = _localized_team_name(item.get("home_team"), item.get("home_team_metadata"), preferred_lang)
+        item["away_team"] = _localized_team_name(item.get("away_team"), item.get("away_team_metadata"), preferred_lang)
+        today_matches.append(item)
 
     if not today_matches:
         return {"ok": True, "data": {"matches_news": [], "generated_at": iso_utc()}}
