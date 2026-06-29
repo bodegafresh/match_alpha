@@ -75,6 +75,16 @@ class CompetitionCapabilities(BaseModel):
     has_knockout: bool
     has_standings: bool
     has_teams: bool
+    has_tournament: bool = False
+    has_elo: bool = False
+
+
+class TournamentView(BaseModel):
+    key: str
+    label: str
+    render_mode: str
+    enabled: bool = True
+    order: int = 0
 
 
 class CompetitionUi(BaseModel):
@@ -95,6 +105,7 @@ class CompetitionLayout(BaseModel):
     capabilities: CompetitionCapabilities
     ui: CompetitionUi
     stages: list[StageLayout]
+    tournament_views: list[TournamentView] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

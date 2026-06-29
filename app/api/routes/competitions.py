@@ -1,7 +1,7 @@
 from collections import defaultdict
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -90,6 +90,31 @@ def _group_label(value: Any) -> str:
     return raw.replace("_", " ") or "Grupo"
 
 
+def _normalize_rating_type(value: str | None) -> str:
+    raw = str(value or "ELO_INTERNATIONAL").strip().upper()
+    aliases = {
+        "GLOBAL": "ELO_GLOBAL",
+        "INTERNATIONAL": "ELO_INTERNATIONAL",
+        "DOMESTIC": "ELO_DOMESTIC",
+        "HOME": "ELO_HOME",
+        "AWAY": "ELO_AWAY",
+        "ELO_GLOBAL": "ELO_GLOBAL",
+        "ELO_INTERNATIONAL": "ELO_INTERNATIONAL",
+        "ELO_DOMESTIC": "ELO_DOMESTIC",
+    }
+    return aliases.get(raw, raw)
+
+
+def _elo_public_label(rating_type: str) -> str:
+    return {
+        "ELO_GLOBAL": "GLOBAL",
+        "ELO_INTERNATIONAL": "INTERNATIONAL",
+        "ELO_DOMESTIC": "DOMESTIC",
+        "ELO_HOME": "HOME",
+        "ELO_AWAY": "AWAY",
+    }.get(rating_type, rating_type)
+
+
 async def _fetch_one(conn: AsyncConnection, sql: str, params: dict[str, Any]) -> dict[str, Any] | None:
     result = await conn.execute(text(sql), params)
     row = result.first()
@@ -99,6 +124,29 @@ async def _fetch_one(conn: AsyncConnection, sql: str, params: dict[str, Any]) ->
 async def _fetch_all(conn: AsyncConnection, sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     result = await conn.execute(text(sql), params)
     return [_dict(row) for row in result]
+
+
+async def _resolve_season_ref(conn: AsyncConnection, season_ref: str) -> dict[str, Any]:
+    season = await _fetch_one(
+        conn,
+        """
+        select
+          cs.competition_season_id::text as competition_season_id,
+          cs.slug as competition_season_slug,
+          cs.season_label,
+          cs.status,
+          c.display_name as competition_name
+        from competition_seasons cs
+        join competitions c on c.competition_id = cs.competition_id
+        where cs.slug = :season_ref
+           or cs.competition_season_id::text = :season_ref
+        limit 1
+        """,
+        {"season_ref": season_ref},
+    )
+    if not season:
+        raise HTTPException(status_code=404, detail="competition season not found")
+    return season
 
 
 @router.get("/catalog")
@@ -125,6 +173,488 @@ async def competition_catalog() -> dict[str, Any]:
             }
         )
     return {"ok": True, "data": {"competitions": entries}}
+
+
+@router.get("/{competition_season_id}/standings/global")
+async def competition_standings_global(
+        competition_season_id: str,
+        conn: AsyncConnection = Depends(get_connection),
+) -> dict[str, Any]:
+        season = await _resolve_season_ref(conn, competition_season_id)
+
+        rows = await _fetch_all(
+                conn,
+                """
+                with season as (
+                    select cast(:season_id as uuid) as competition_season_id
+                ),
+                entries as (
+                    select
+                        cte.team_id::text as team_id,
+                        t.slug as team_slug,
+                        t.display_name as team_name,
+                        t.country_code,
+                        c.flag_emoji,
+                        c.fifa_code as country_fifa_code,
+                        c.continent,
+                        c.region as country_region
+                    from competition_team_entries cte
+                    join season s on s.competition_season_id = cte.competition_season_id
+                    join teams t on t.team_id = cte.team_id
+                    left join countries c on c.code_alpha2 = t.country_code
+                ),
+                latest as (
+                    select distinct on (st.team_id)
+                        st.team_id::text as team_id,
+                        st.position as stage_position,
+                        st.played,
+                        st.wins,
+                        st.draws,
+                        st.losses,
+                        st.goals_for,
+                        st.goals_against,
+                        st.goal_difference,
+                        st.points,
+                        st.qualification_status,
+                        cg.group_code,
+                        cg.group_name,
+                        cs.stage_code,
+                        cs.stage_name,
+                        st.as_of
+                    from standings st
+                    join season s on s.competition_season_id = st.competition_season_id
+                    left join competition_groups cg on cg.group_id = st.group_id
+                    left join competition_stages cs on cs.stage_id = st.stage_id
+                    order by st.team_id, st.as_of desc nulls last
+                ),
+                ranked as (
+                    select
+                        e.*,
+                        l.stage_position,
+                        l.played,
+                        l.wins,
+                        l.draws,
+                        l.losses,
+                        l.goals_for,
+                        l.goals_against,
+                        l.goal_difference,
+                        l.points,
+                        l.qualification_status,
+                        l.group_code,
+                        l.group_name,
+                        l.stage_code,
+                        l.stage_name,
+                        row_number() over (
+                            order by
+                                coalesce(l.points, 0) desc,
+                                coalesce(l.goal_difference, 0) desc,
+                                coalesce(l.goals_for, 0) desc,
+                                coalesce(l.played, 9999) asc,
+                                lower(e.team_name) asc
+                        ) as global_position
+                    from entries e
+                    left join latest l on l.team_id = e.team_id
+                )
+                select *
+                from ranked
+                order by global_position
+                """,
+                {"season_id": season["competition_season_id"]},
+        )
+
+        teams = []
+        for row in rows:
+                teams.append(
+                        {
+                                "global_position": row["global_position"],
+                                "team_id": row["team_id"],
+                                "team_slug": row["team_slug"],
+                                "team_name": row["team_name"],
+                                "country_code": row["country_code"],
+                                "flag_emoji": row["flag_emoji"],
+                                "fifa_code": row["country_fifa_code"],
+                                "group_code": row["group_code"],
+                                "group_name": row["group_name"],
+                                "stage_code": row["stage_code"],
+                                "stage_name": row["stage_name"],
+                                "stage_position": row["stage_position"],
+                                "points": row["points"] or 0,
+                                "played": row["played"] or 0,
+                                "wins": row["wins"] or 0,
+                                "draws": row["draws"] or 0,
+                                "losses": row["losses"] or 0,
+                                "goals_for": row["goals_for"] or 0,
+                                "goals_against": row["goals_against"] or 0,
+                                "goal_difference": row["goal_difference"] or 0,
+                                "status": row["qualification_status"] or "PENDING",
+                        }
+                )
+
+        return {
+                "ok": True,
+                "data": {
+                        "competition_season_id": season["competition_season_id"],
+                        "season_slug": season["competition_season_slug"],
+                        "season_label": season.get("season_label"),
+                        "competition_name": season.get("competition_name"),
+                        "teams": teams,
+                },
+        }
+
+
+@router.get("/{competition_season_id}/teams")
+async def competition_teams_catalog(
+        competition_season_id: str,
+        search: str | None = Query(default=None),
+        sort: str = Query(default="name"),
+        group: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        country: str | None = Query(default=None),
+        continent: str | None = Query(default=None),
+        elo_rating_type: str = Query(default="ELO_GLOBAL"),
+        conn: AsyncConnection = Depends(get_connection),
+) -> dict[str, Any]:
+        season = await _resolve_season_ref(conn, competition_season_id)
+        rating_type = _normalize_rating_type(elo_rating_type)
+
+        rows = await _fetch_all(
+                conn,
+                """
+                with season as (
+                    select cast(:season_id as uuid) as competition_season_id
+                ),
+                entries as (
+                    select
+                        cte.team_id::text as team_id,
+                        t.slug as team_slug,
+                        t.display_name as team_name,
+                        t.country_code,
+                        c.flag_emoji,
+                        c.fifa_code as country_fifa_code,
+                        c.continent,
+                        c.region as country_region
+                    from competition_team_entries cte
+                    join season s on s.competition_season_id = cte.competition_season_id
+                    join teams t on t.team_id = cte.team_id
+                    left join countries c on c.code_alpha2 = t.country_code
+                ),
+                latest_standings as (
+                    select distinct on (st.team_id)
+                        st.team_id::text as team_id,
+                        st.position as stage_position,
+                        st.played,
+                        st.wins,
+                        st.draws,
+                        st.losses,
+                        st.goals_for,
+                        st.goals_against,
+                        st.goal_difference,
+                        st.points,
+                        st.qualification_status,
+                        cg.group_code,
+                        cg.group_name,
+                        cs.stage_code,
+                        cs.stage_name,
+                        st.as_of
+                    from standings st
+                    join season s on s.competition_season_id = st.competition_season_id
+                    left join competition_groups cg on cg.group_id = st.group_id
+                    left join competition_stages cs on cs.stage_id = st.stage_id
+                    order by st.team_id, st.as_of desc nulls last
+                ),
+                latest_elo as (
+                    select distinct on (rs.team_id)
+                        rs.team_id::text as team_id,
+                        rs.rating_value as rating_value,
+                        rs.as_of
+                    from rating_snapshots rs
+                    join season s on s.competition_season_id = rs.competition_season_id
+                    where rs.rating_type = :rating_type
+                    order by rs.team_id, rs.as_of desc
+                ),
+                roster as (
+                    select
+                        cr.team_id::text as team_id,
+                        count(distinct cr.player_id)::int as roster_count
+                    from competition_rosters cr
+                    join season s on s.competition_season_id = cr.competition_season_id
+                    group by cr.team_id
+                )
+                select
+                    e.*,
+                    ls.stage_position,
+                    ls.played,
+                    ls.wins,
+                    ls.draws,
+                    ls.losses,
+                    ls.goals_for,
+                    ls.goals_against,
+                    ls.goal_difference,
+                    ls.points,
+                    ls.qualification_status,
+                    ls.group_code,
+                    ls.group_name,
+                    ls.stage_code,
+                    ls.stage_name,
+                    le.rating_value as elo_rating,
+                    coalesce(r.roster_count, 0) as roster_count,
+                    row_number() over (
+                        order by
+                            coalesce(ls.points, 0) desc,
+                            coalesce(ls.goal_difference, 0) desc,
+                            coalesce(ls.goals_for, 0) desc,
+                            coalesce(ls.played, 9999) asc,
+                            lower(e.team_name) asc
+                    ) as global_position
+                from entries e
+                left join latest_standings ls on ls.team_id = e.team_id
+                left join latest_elo le on le.team_id = e.team_id
+                left join roster r on r.team_id = e.team_id
+                """,
+                {"season_id": season["competition_season_id"], "rating_type": rating_type},
+        )
+
+        normalized_search = str(search or "").strip().lower()
+        normalized_group = str(group or "").strip().lower()
+        normalized_status = str(status or "").strip().upper()
+        normalized_country = str(country or "").strip().upper()
+        normalized_continent = str(continent or "").strip().lower()
+
+        filtered = []
+        for row in rows:
+                if normalized_search and normalized_search not in str(row.get("team_name") or "").lower():
+                        continue
+                if normalized_group:
+                        group_candidate = str(row.get("group_code") or row.get("group_name") or "").lower()
+                        if normalized_group not in group_candidate:
+                                continue
+                if normalized_status and normalized_status != str(row.get("qualification_status") or "PENDING").upper():
+                        continue
+                if normalized_country and normalized_country != str(row.get("country_code") or "").upper():
+                        continue
+                if normalized_continent and normalized_continent != str(row.get("continent") or "").lower():
+                        continue
+                filtered.append(row)
+
+        sort_key = str(sort or "name").strip().lower()
+        if sort_key == "position":
+                filtered.sort(key=lambda r: (r.get("global_position") or 9999, str(r.get("team_name") or "").lower()))
+        elif sort_key == "points":
+                filtered.sort(
+                        key=lambda r: (
+                                -(r.get("points") or 0),
+                                -(r.get("goal_difference") or 0),
+                                -(r.get("goals_for") or 0),
+                                r.get("played") or 9999,
+                                str(r.get("team_name") or "").lower(),
+                        )
+                )
+        elif sort_key == "elo":
+                filtered.sort(key=lambda r: (-(r.get("elo_rating") or 0), str(r.get("team_name") or "").lower()))
+        else:
+                filtered.sort(key=lambda r: str(r.get("team_name") or "").lower())
+
+        teams = []
+        for row in filtered:
+                teams.append(
+                        {
+                                "team_id": row["team_id"],
+                                "team_slug": row["team_slug"],
+                                "team_name": row["team_name"],
+                                "slug": row["team_slug"],
+                                "display_name": row["team_name"],
+                                "flag_emoji": row["flag_emoji"],
+                                "fifa_code": row.get("country_fifa_code"),
+                                "country_code": row.get("country_code"),
+                                "continent": row.get("continent"),
+                                "region": row.get("country_region"),
+                                "group_code": row.get("group_code"),
+                                "group_name": row.get("group_name"),
+                                "stage_code": row.get("stage_code"),
+                                "stage_name": row.get("stage_name"),
+                                "global_position": row.get("global_position"),
+                                "position": row.get("stage_position"),
+                                "points": row.get("points") or 0,
+                                "played": row.get("played") or 0,
+                                "wins": row.get("wins") or 0,
+                                "draws": row.get("draws") or 0,
+                                "losses": row.get("losses") or 0,
+                                "goals_for": row.get("goals_for") or 0,
+                                "goals_against": row.get("goals_against") or 0,
+                                "goal_difference": row.get("goal_difference") or 0,
+                                "elo_rating": row.get("elo_rating"),
+                                "roster_count": row.get("roster_count") or 0,
+                                "status": row.get("qualification_status") or "PENDING",
+                        }
+                )
+
+        available_groups = sorted({str(r.get("group_code") or "").strip() for r in rows if r.get("group_code")})
+        available_statuses = sorted({str(r.get("qualification_status") or "PENDING").strip() for r in rows})
+        available_countries = sorted({str(r.get("country_code") or "").strip() for r in rows if r.get("country_code")})
+        available_continents = sorted({str(r.get("continent") or "").strip() for r in rows if r.get("continent")})
+
+        return {
+                "ok": True,
+                "data": {
+                        "competition_season_id": season["competition_season_id"],
+                        "season_slug": season["competition_season_slug"],
+                        "rating_type": _elo_public_label(rating_type),
+                        "teams": teams,
+                        "filters": {
+                                "search": search,
+                                "sort": sort_key,
+                                "group": group,
+                                "status": status,
+                                "country": country,
+                                "continent": continent,
+                        },
+                        "available_filters": {
+                                "groups": available_groups,
+                                "statuses": available_statuses,
+                                "countries": available_countries,
+                                "continents": available_continents,
+                        },
+                },
+        }
+
+
+@router.get("/{competition_season_id}/elo")
+async def competition_elo_ranking(
+        competition_season_id: str,
+        rating_type: str = Query(default="INTERNATIONAL"),
+        conn: AsyncConnection = Depends(get_connection),
+) -> dict[str, Any]:
+        season = await _resolve_season_ref(conn, competition_season_id)
+        normalized_rating_type = _normalize_rating_type(rating_type)
+
+        available_types_rows = await _fetch_all(
+                conn,
+                """
+                select distinct rs.rating_type
+                from rating_snapshots rs
+                where rs.competition_season_id = cast(:season_id as uuid)
+                order by rs.rating_type
+                """,
+                {"season_id": season["competition_season_id"]},
+        )
+        available_types = [row["rating_type"] for row in available_types_rows]
+
+        if normalized_rating_type not in available_types and available_types:
+                if "ELO_INTERNATIONAL" in available_types:
+                        normalized_rating_type = "ELO_INTERNATIONAL"
+                elif "ELO_GLOBAL" in available_types:
+                        normalized_rating_type = "ELO_GLOBAL"
+                else:
+                        normalized_rating_type = available_types[0]
+
+        rows = await _fetch_all(
+                conn,
+                """
+                with season as (
+                    select cast(:season_id as uuid) as competition_season_id
+                ),
+                entries as (
+                    select
+                        cte.team_id::text as team_id,
+                        t.slug as team_slug,
+                        t.display_name as team_name,
+                        t.country_code,
+                        c.flag_emoji
+                    from competition_team_entries cte
+                    join season s on s.competition_season_id = cte.competition_season_id
+                    join teams t on t.team_id = cte.team_id
+                    left join countries c on c.code_alpha2 = t.country_code
+                ),
+                ratings as (
+                    select
+                        rs.team_id::text as team_id,
+                        rs.rating_value,
+                        rs.as_of,
+                        row_number() over (partition by rs.team_id order by rs.as_of desc) as rn,
+                        lead(rs.rating_value) over (partition by rs.team_id order by rs.as_of desc) as previous_rating
+                    from rating_snapshots rs
+                    join season s on s.competition_season_id = rs.competition_season_id
+                    where rs.rating_type = :rating_type
+                ),
+                latest as (
+                    select
+                        team_id,
+                        rating_value,
+                        previous_rating,
+                        as_of
+                    from ratings
+                    where rn = 1
+                ),
+                matches_count as (
+                    select
+                        mp.team_id::text as team_id,
+                        count(distinct mp.match_id)::int as matches
+                    from match_participants mp
+                    join matches m on m.match_id = mp.match_id
+                    join season s on s.competition_season_id = m.competition_season_id
+                    where m.status = 'FINISHED'
+                    group by mp.team_id
+                )
+                select
+                    e.team_id,
+                    e.team_slug,
+                    e.team_name,
+                    e.country_code,
+                    e.flag_emoji,
+                    l.rating_value,
+                    l.previous_rating,
+                    l.as_of,
+                    coalesce(mc.matches, 0) as matches,
+                    row_number() over (
+                        order by coalesce(l.rating_value, -1) desc, lower(e.team_name) asc
+                    ) as rank
+                from entries e
+                left join latest l on l.team_id = e.team_id
+                left join matches_count mc on mc.team_id = e.team_id
+                order by rank
+                """,
+                {
+                        "season_id": season["competition_season_id"],
+                        "rating_type": normalized_rating_type,
+                },
+        )
+
+        updated_at = None
+        for row in rows:
+                as_of = row.get("as_of")
+                if as_of and (updated_at is None or as_of > updated_at):
+                        updated_at = as_of
+
+        teams = []
+        for row in rows:
+                rating = row.get("rating_value")
+                previous = row.get("previous_rating")
+                teams.append(
+                        {
+                                "rank": row.get("rank"),
+                                "team_id": row.get("team_id"),
+                                "team_slug": row.get("team_slug"),
+                                "team_name": row.get("team_name"),
+                                "country_code": row.get("country_code"),
+                                "flag": row.get("flag_emoji"),
+                                "rating": float(rating) if rating is not None else None,
+                                "previous_rating": float(previous) if previous is not None else None,
+                                "delta": (float(rating) - float(previous)) if rating is not None and previous is not None else None,
+                                "matches": row.get("matches") or 0,
+                        }
+                )
+
+        return {
+                "ok": True,
+                "data": {
+                        "competition_season_id": season["competition_season_id"],
+                        "season_slug": season["competition_season_slug"],
+                        "rating_type": _elo_public_label(normalized_rating_type),
+                        "rating_types": [_elo_public_label(rt) for rt in available_types],
+                        "updated_at": updated_at.isoformat() if updated_at else None,
+                        "teams": teams,
+                },
+        }
 
 
 @router.get("/{competition_season_id}/layout", response_model=CompetitionLayoutEnvelope)
@@ -297,6 +827,14 @@ async def competition_layout(
     has_league_table = view_type_counts.get("LEAGUE_TABLE", 0) > 0
     has_standings = bool((standings_count or {}).get("count")) or has_groups or has_league_table
     has_teams = bool((team_count or {}).get("count"))
+    has_tournament = has_groups or has_knockout or has_league_table
+
+    rating_count = await _fetch_one(
+        conn,
+        "select count(*)::int as count from rating_snapshots where competition_season_id = cast(:season_id as uuid)",
+        params,
+    )
+    has_elo = bool((rating_count or {}).get("count"))
 
     season_metadata = _as_dict(season.get("season_metadata"))
     competition_metadata = _as_dict(season.get("competition_metadata"))
@@ -307,7 +845,13 @@ async def competition_layout(
         _navigation_item("matches", "Partidos", True, 10),
         _navigation_item("standings", "Posiciones", has_standings, 20),
         _navigation_item("teams", "Equipos", has_teams, 30),
-        _navigation_item("bracket", "Eliminatorias", has_knockout, 40),
+        _navigation_item("tournament", "Torneo", has_tournament, 40),
+        _navigation_item("news", "Noticias", True, 50),
+        _navigation_item("elo", "ELO", has_elo, 60),
+        _navigation_item("ev", "EV+", True, 70),
+        _navigation_item("model", "Modelo", True, 80),
+        _navigation_item("stats", "Stats", True, 90),
+        _navigation_item("bracket", "Eliminatorias", has_knockout, 400),
     ]
     fallback_by_key = {item["key"]: item for item in fallback_nav}
     navigation = []
@@ -337,6 +881,29 @@ async def competition_layout(
     if default_view not in {item["key"] for item in navigation} and navigation:
         default_view = navigation[0]["key"]
 
+    tournament_views: list[dict[str, Any]] = []
+
+    has_group_tables = any(str(stage["view_type"]).upper() == "GROUP_TABLES" for stage in stage_dtos)
+    has_league_table_view = any(str(stage["view_type"]).upper() == "LEAGUE_TABLE" for stage in stage_dtos)
+    has_match_list = any(str(stage["view_type"]).upper() == "MATCH_LIST" for stage in stage_dtos)
+    has_bracket = any(str(stage["view_type"]).upper() == "BRACKET_ROUND" for stage in stage_dtos)
+
+    order = 10
+    if has_group_tables:
+        tournament_views.append({"key": "groups", "label": "Grupos", "render_mode": "GROUP_TABLES", "enabled": True, "order": order})
+        order += 10
+    if has_league_table_view:
+        tournament_views.append({"key": "table", "label": "Tabla", "render_mode": "LEAGUE_TABLE", "enabled": True, "order": order})
+        order += 10
+    if has_match_list:
+        tournament_views.append({"key": "fixtures", "label": "Fechas", "render_mode": "MATCH_LIST", "enabled": True, "order": order})
+        order += 10
+    if has_bracket:
+        tournament_views.append({"key": "knockout", "label": "Eliminatoria", "render_mode": "BRACKET", "enabled": True, "order": order})
+        order += 10
+    if has_groups:
+        tournament_views.append({"key": "qualified", "label": "Clasificados", "render_mode": "QUALIFICATION_SUMMARY", "enabled": True, "order": order})
+
     layout = {
         "competition": {
             "competition_id": season["competition_id"],
@@ -365,12 +932,15 @@ async def competition_layout(
             "has_knockout": has_knockout,
             "has_standings": has_standings,
             "has_teams": has_teams,
+            "has_tournament": has_tournament,
+            "has_elo": has_elo,
         },
         "ui": {
             "default_view": default_view,
             "navigation": navigation,
         },
         "stages": stage_dtos,
+        "tournament_views": sorted(tournament_views, key=lambda item: item["order"]),
         "metadata": {
             "format": _as_dict(season_metadata.get("format")),
             "ui": ui_metadata,
