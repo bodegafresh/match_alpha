@@ -111,7 +111,11 @@ async def _load_players(conn: AsyncConnection) -> list[_PlayerRow]:
     return out
 
 
-def _build_merge_plan(players: list[_PlayerRow], country_code: str | None = None) -> list[dict[str, str]]:
+def _build_merge_plan(
+    players: list[_PlayerRow],
+    country_code: str | None = None,
+    allow_exact_normalized_name_merge: bool = False,
+) -> list[dict[str, str]]:
     eligible = [
         p
         for p in players
@@ -128,24 +132,10 @@ def _build_merge_plan(players: list[_PlayerRow], country_code: str | None = None
         groups.setdefault(key, []).append(p)
 
     plan: list[dict[str, str]] = []
-
-    # Exact normalized_name duplicates.
-    exact_groups: dict[tuple[str, str], list[_PlayerRow]] = {}
-    for p in eligible:
-        exact_groups.setdefault((p.nationality_country_code or "", p.normalized_name), []).append(p)
-
     planned_sources: set[str] = set()
-    for _, rows in exact_groups.items():
-        if len(rows) <= 1:
-            continue
-        master = sorted(rows, key=lambda x: (_player_score(x), x.created_at), reverse=True)[0]
-        for row in rows:
-            if row.player_id == master.player_id:
-                continue
-            plan.append({"source_player_id": row.player_id, "target_player_id": master.player_id, "reason": "EXACT_NORMALIZED_NAME"})
-            planned_sources.add(row.player_id)
 
-    # Abbreviation to full-name merge when unambiguous.
+    # 1) Prioritize abbreviation -> full-name merges when unambiguous.
+    # This keeps limited runs focused on the highest-confidence identity fixes.
     for _, rows in groups.items():
         full_rows = [r for r in rows if not is_abbreviated_name(r.normalized_name)]
         abbr_rows = [r for r in rows if is_abbreviated_name(r.normalized_name)]
@@ -157,6 +147,31 @@ def _build_merge_plan(players: list[_PlayerRow], country_code: str | None = None
                 continue
             plan.append({"source_player_id": abbr.player_id, "target_player_id": master.player_id, "reason": "ABBREVIATED_TO_FULL_UNAMBIGUOUS"})
             planned_sources.add(abbr.player_id)
+
+    # 2) Exact normalized-name merges are optional because they can be risky
+    # for common names with sparse identity attributes.
+    if not allow_exact_normalized_name_merge:
+        return plan
+
+    exact_groups: dict[tuple[str, str], list[_PlayerRow]] = {}
+    for p in eligible:
+        exact_groups.setdefault((p.nationality_country_code or "", p.normalized_name), []).append(p)
+
+    for _, rows in exact_groups.items():
+        if len(rows) <= 1:
+            continue
+
+        # Guard: if exact-name rows disagree on known birth dates, skip auto-merge.
+        birth_dates = {str(r.birth_date) for r in rows if r.birth_date is not None}
+        if len(birth_dates) > 1:
+            continue
+
+        master = sorted(rows, key=lambda x: (_player_score(x), x.created_at), reverse=True)[0]
+        for row in rows:
+            if row.player_id == master.player_id or row.player_id in planned_sources:
+                continue
+            plan.append({"source_player_id": row.player_id, "target_player_id": master.player_id, "reason": "EXACT_NORMALIZED_NAME"})
+            planned_sources.add(row.player_id)
 
     return plan
 
@@ -190,9 +205,14 @@ async def validate_players_identity_consistency(conn: AsyncConnection, payload: 
     max_candidates = int(payload.get("max_merge_candidates", 500) or 500)
     max_candidate_ratio = float(payload.get("max_candidate_ratio", 0.03) or 0.03)
     max_ambiguous_signatures = int(payload.get("max_ambiguous_signatures", 200) or 200)
+    allow_exact_normalized_name_merge = bool(payload.get("allow_exact_normalized_name_merge", False))
 
     players = await _load_players(conn)
-    plan = _build_merge_plan(players, country_code=country_code)
+    plan = _build_merge_plan(
+        players,
+        country_code=country_code,
+        allow_exact_normalized_name_merge=allow_exact_normalized_name_merge,
+    )
     ambiguous_signatures = _count_ambiguous_signatures(players, country_code=country_code)
     scoped_players = [
         p
@@ -223,6 +243,7 @@ async def validate_players_identity_consistency(conn: AsyncConnection, payload: 
             "merge_candidate_ratio": candidate_ratio,
             "ambiguous_signatures": ambiguous_signatures,
             "country_code": country_code,
+            "allow_exact_normalized_name_merge": allow_exact_normalized_name_merge,
         },
         "thresholds": {
             "max_merge_candidates": max_candidates,
@@ -590,14 +611,20 @@ async def reconcile_players_identity(conn: AsyncConnection, payload: dict[str, A
     - dry_run: bool (default false)
     - limit_merges: int (default 1000)
     - country_code: optional alpha-2 filter (e.g. "AR")
+    - allow_exact_normalized_name_merge: bool (default false)
     """
     dry_run = bool(payload.get("dry_run", False))
     limit_merges = int(payload.get("limit_merges", 1000) or 1000)
     country_code = payload.get("country_code")
     country_code = str(country_code).upper() if country_code else None
+    allow_exact_normalized_name_merge = bool(payload.get("allow_exact_normalized_name_merge", False))
 
     players = await _load_players(conn)
-    plan = _build_merge_plan(players, country_code=country_code)
+    plan = _build_merge_plan(
+        players,
+        country_code=country_code,
+        allow_exact_normalized_name_merge=allow_exact_normalized_name_merge,
+    )
     if limit_merges > 0:
         plan = plan[:limit_merges]
 
@@ -611,6 +638,7 @@ async def reconcile_players_identity(conn: AsyncConnection, payload: dict[str, A
                 "players_scanned": len(players),
                 "merge_candidates": len(plan),
                 "country_code": country_code,
+                "allow_exact_normalized_name_merge": allow_exact_normalized_name_merge,
             },
             "merge_plan": plan[:300],
             "generated_at": iso_utc(),
@@ -645,6 +673,7 @@ async def reconcile_players_identity(conn: AsyncConnection, payload: dict[str, A
             "merged": len(merges_done),
             "skipped": len(skipped),
             "country_code": country_code,
+            "allow_exact_normalized_name_merge": allow_exact_normalized_name_merge,
         },
         "merged_pairs": merges_done[:500],
         "skipped_pairs": skipped[:200],

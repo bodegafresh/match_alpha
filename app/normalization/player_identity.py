@@ -4,10 +4,32 @@ import re
 import unicodedata
 
 
+_CHAR_FOLDS = str.maketrans(
+    {
+        "ß": "ss",
+        "ẞ": "ss",
+        "ø": "o",
+        "Ø": "o",
+        "đ": "d",
+        "Đ": "d",
+        "ł": "l",
+        "Ł": "l",
+        "þ": "th",
+        "Þ": "th",
+        "æ": "ae",
+        "Æ": "ae",
+        "œ": "oe",
+        "Œ": "oe",
+    }
+)
+
+
 def normalize_identity_name(name: str) -> str:
     """Normalize player/team names for identity matching across data sources."""
-    s = unicodedata.normalize("NFD", str(name or ""))
+    s = str(name or "").translate(_CHAR_FOLDS)
+    s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    s = s.encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^a-zA-Z0-9]+", " ", s).strip().lower()
     return re.sub(r"\s+", " ", s)
 
@@ -21,10 +43,10 @@ def name_signature(normalized_name: str) -> tuple[str, str] | None:
     if len(tokens) < 2:
         return None
     first = tokens[0]
-    last = tokens[-1]
-    if not first or not last:
+    surname = " ".join(tokens[1:])
+    if not first or not surname:
         return None
-    return (last, first[0])
+    return (surname, first[0])
 
 
 def is_abbreviated_name(normalized_name: str) -> bool:
