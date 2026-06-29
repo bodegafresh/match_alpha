@@ -1,0 +1,62 @@
+app/jobs/orchestrator.py
+  s_5464458db59e8d::t_d28ec62e10f8a6 104-105,118-135
+  s_5464458db59e8d::t_02499488be7e9c 25,100-103,106-111,113-115,117,200-206,208,216,229-231,250
+gas/src/scheduler.gs
+  s_5464458db59e8d::t_427a4801ea4cb9 150-159,265-266,305-311,314-315,330,334,342
+tests/test_player_identity.py
+  s_5464458db59e8d::t_84a1684b53d31f 1-26
+app/normalization/player_identity.py
+  s_5464458db59e8d::t_534e273acc3664 1-51
+app/jobs/registry.py
+  s_5464458db59e8d::t_4612373ce56d40 42-45,1090-1116,1195
+  s_5464458db59e8d::t_89c477b7f2cc19 1062
+  s_5464458db59e8d::t_b3ceccb6b64301 1144-1146,1162-1163,1197
+  s_5464458db59e8d::t_49b2fbf62f7b51 41,1117-1143,1196
+  s_5464458db59e8d::t_10cbf853b68688 1065-1075,1191
+  s_5464458db59e8d::t_04891a0a411777 36-40,1147-1161,1198-1200
+app/competitions/team_sync.py
+  s_5464458db59e8d::t_89fb1b013d1353 10,721,728-731,733-738
+  s_5464458db59e8d::t_0308cde879b4df 1530-1532,1565,1966-1972,1995-1997,2013-2015,2036-2037
+  s_5464458db59e8d::t_9c3e2a69f97fdd 23,37
+  s_5464458db59e8d::t_ee44ab8793a6c7 993-1282
+  s_5464458db59e8d::t_60d5eccc3a7371 732,1512,1570-1623,1973,2043,2045
+  s_5464458db59e8d::t_ebb384f2a17d6c 1283-1452
+app/normalization/core_entities_identity.py
+  s_5464458db59e8d::t_136578e357c316 1-132
+app/normalization/player_dedup.py
+  s_5464458db59e8d::t_d1a0aaba9d1da0 12-18,47,118,124,150-151,162-234,543,546
+  s_5464458db59e8d::t_43c6854305c462 1-11,19-46,48-117,119-123,125-149,152-161,235-542,544-545,547-652
+tests/test_core_entities_dedup.py
+  s_5464458db59e8d::t_10e46df9c2c1de 1-48
+app/normalization/core_entities_dedup.py
+  s_5464458db59e8d::t_dbf7a351a226c0 1-5,7-1149,1151-1152,1154-1179,1183-1201,1204-1213,1215-1216,1218-1243,1247-1265,1268-1277,1279-1280,1282-1307,1311-1329,1332-1336
+  s_5464458db59e8d::t_21186591ad5508 6,1150,1153,1180-1182,1202-1203,1214,1217,1244-1246,1266-1267,1278,1281,1308-1310,1330-1331
+README.md
+  s_5464458db59e8d::t_cb8beade3cdc95 77-91,153-161
+  s_5464458db59e8d::t_e7c825aa98b872 123-125
+  s_5464458db59e8d::t_faa8add49d8fef 115-118,122
+  s_5464458db59e8d::t_38bd4a09e21a36 67-76,143-152
+app/core/config.py
+  s_5464458db59e8d::t_da85ee129a7594 46-57
+  s_5464458db59e8d::t_1cfe360d43bfb5 58-69
+tests/test_core_entities_identity.py
+  s_5464458db59e8d::t_ba92a30a564cc8 1-16
+app/api/routes/jobs.py
+  s_5464458db59e8d::t_f8e8a120209481 56-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "9d5c83a7bf4d419740800ea069405c97760d1700",
+  "prompts": {},
+  "sessions": {
+    "s_5464458db59e8d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "07c90802-5b7f-4a48-9c11-612e4c1d71c7",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
