@@ -17,6 +17,7 @@ from app.clients.api_football_client import ApiFootballClient
 from app.clients.football_data_client import FootballDataClient
 from app.clients.sportmonks_client import SportmonksClient
 from app.competitions.catalog import supported_competitions
+from app.competitions.service import seed_competition_catalog
 from app.core.config import get_settings
 from app.core.time import iso_utc
 from app.db.repositories.observability import ObservabilityRepository
@@ -467,6 +468,8 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         }
 
     for entry in supported_competitions():
+        # Ensure the season exists for every catalog entry before syncing source data.
+        await seed_competition_catalog(conn, entry.slug)
         league_api_football_id = entry.source.external_ids.get("API_FOOTBALL")
         league_football_data_code = entry.source.external_ids.get("FOOTBALL_DATA")
         has_sportmonks_capability = "teams" in (entry.source.capabilities.get("SPORTMONKS") or [])
@@ -1575,6 +1578,8 @@ async def sync_players_for_all_leagues(conn: AsyncConnection, payload: dict[str,
         }
 
     for entry in supported_competitions():
+        # Ensure the season exists for every catalog entry before syncing source data.
+        await seed_competition_catalog(conn, entry.slug)
         if _time_budget_exceeded():
             skipped.append({"league": entry.slug, "reason": "TIME_BUDGET_EXCEEDED"})
             continue

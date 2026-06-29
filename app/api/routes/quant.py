@@ -15,14 +15,24 @@ async def predictions_upcoming(limit: int = Query(50, ge=1, le=200), conn: Async
 
 
 @router.get("/ev/opportunities")
-async def ev_opportunities(limit: int = Query(50, ge=1, le=200), conn: AsyncConnection = Depends(get_connection)) -> dict:
-    rows = await PublishedRepository(conn).ev_opportunities(limit)
+async def ev_opportunities(
+    limit: int = Query(50, ge=1, le=200),
+    season: str | None = Query(default=None),
+    today_only: bool = Query(default=True),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
+    rows = await PublishedRepository(conn).ev_opportunities(limit=limit, season=season, today_only=today_only)
     return {"ok": True, "data": {"opportunities": rows}}
 
 
 @router.get("/ev/blocked")
-async def ev_blocked(limit: int = Query(50, ge=1, le=200), conn: AsyncConnection = Depends(get_connection)) -> dict:
-    rows = await PublishedRepository(conn).blocked_decisions(limit)
+async def ev_blocked(
+    limit: int = Query(50, ge=1, le=200),
+    season: str | None = Query(default=None),
+    today_only: bool = Query(default=True),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
+    rows = await PublishedRepository(conn).blocked_decisions(limit=limit, season=season, today_only=today_only)
     return {"ok": True, "data": {"blocked": rows}}
 
 

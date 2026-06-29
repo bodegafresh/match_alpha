@@ -92,6 +92,10 @@ _MATCH_ORDER = "order by m.kickoff_at asc, m.match_number nulls last"
 
 
 class PublishedRepository(Repository):
+    _CL_DAY_START_SQL = (
+        "(date_trunc('day', now() AT TIME ZONE 'America/Santiago') AT TIME ZONE 'America/Santiago')"
+    )
+
     def _coerce_datetime(self, value: datetime | str | None) -> datetime | None:
         if value is None:
             return None
@@ -190,23 +194,101 @@ class PublishedRepository(Repository):
             {"season": season},
         )
 
-    async def ev_opportunities(self, limit: int = 50) -> list[dict[str, Any]]:
-        return await self.fetch_all(
-            "select * from published_ev_opportunities order by decided_at desc limit :limit",
-            {"limit": limit},
+    async def ev_opportunities(
+      self,
+      limit: int = 50,
+      season: str | None = None,
+      today_only: bool = True,
+    ) -> list[dict[str, Any]]:
+      filters: list[str] = []
+      params: dict[str, Any] = {"limit": limit}
+
+      if season:
+        filters.append(
+          "competition_season_id = ("
+          "select competition_season_id from competition_seasons where slug = :season limit 1"
+          ")"
+        )
+        params["season"] = season
+
+      if today_only:
+        filters.append(
+          "kickoff_at >= "
+          f"{self._CL_DAY_START_SQL}"
+          " and kickoff_at < "
+          f"{self._CL_DAY_START_SQL} + interval '1 day'"
         )
 
-    async def blocked_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
-        return await self.fetch_all(
-            "select * from published_blocked_decisions order by decided_at desc limit :limit",
-            {"limit": limit},
+      where_clause = f" where {' and '.join(filters)}" if filters else ""
+      sql = (
+        "select * from published_ev_opportunities"
+        f"{where_clause}"
+        " order by kickoff_at asc, ev desc nulls last, decided_at desc"
+        " limit :limit"
+      )
+      return await self.fetch_all(sql, params)
+
+    async def blocked_decisions(
+      self,
+      limit: int = 50,
+      season: str | None = None,
+      today_only: bool = True,
+    ) -> list[dict[str, Any]]:
+      filters: list[str] = []
+      params: dict[str, Any] = {"limit": limit}
+
+      if season:
+        filters.append(
+          "competition_season_id = ("
+          "select competition_season_id from competition_seasons where slug = :season limit 1"
+          ")"
         )
+        params["season"] = season
+
+      if today_only:
+        filters.append(
+          "kickoff_at >= "
+          f"{self._CL_DAY_START_SQL}"
+          " and kickoff_at < "
+          f"{self._CL_DAY_START_SQL} + interval '1 day'"
+        )
+
+      where_clause = f" where {' and '.join(filters)}" if filters else ""
+      sql = (
+        "select * from published_blocked_decisions"
+        f"{where_clause}"
+        " order by kickoff_at asc, decided_at desc"
+        " limit :limit"
+      )
+      return await self.fetch_all(sql, params)
 
     async def calibration_summary(self, limit: int = 50) -> list[dict[str, Any]]:
-        return await self.fetch_all(
+      rows = await self.fetch_all(
             "select * from published_model_calibration order by created_at desc limit :limit",
             {"limit": limit},
         )
+      if rows:
+        return rows
+
+      counts = await self.fetch_one(
+        """
+        select
+          count(*) filter (where settlement_status = 'SETTLED')::int as n_settled,
+          count(*)::int as total_predictions
+        from betting_decisions
+        """,
+      ) or {"n_settled": 0, "total_predictions": 0}
+
+      return [{
+        "created_at": None,
+        "method": "PENDING",
+        "sample_size": 0,
+        "n_settled": counts.get("n_settled", 0),
+        "total_predictions": counts.get("total_predictions", 0),
+        "brier_score": None,
+        "log_loss": None,
+        "ece": None,
+      }]
 
     async def model_diagnostics(self) -> list[dict[str, Any]]:
         return await self.fetch_all(
@@ -214,28 +296,33 @@ class PublishedRepository(Repository):
         )
 
     async def bankroll_decisions(self, limit: int = 200) -> list[dict[str, Any]]:
-        """Returns SETTLED betting decisions in chronological order for bankroll simulation."""
+        """Returns latest betting decisions in chronological order for model stats UI."""
         return await self.fetch_all(
             """
-            select
-              bd.betting_decision_id::text,
-              bd.decided_at,
-              bd.decision_status::text,
-              bd.ev,
-              bd.edge,
-              bd.kelly_fraction,
-              bd.stake_fraction,
-              bd.settlement_status::text,
-              bd.settlement_profit_units,
-              m.market_code,
-              s.selection_code
-            from betting_decisions bd
-            join model_predictions p on p.prediction_id = bd.prediction_id
-            join markets m on m.market_id = p.market_id
-            join market_selections s on s.selection_id = p.selection_id
-            where bd.settlement_status = 'SETTLED'
-            order by bd.decided_at asc
-            limit :limit
+            with latest as (
+              select
+                bd.betting_decision_id::text,
+                bd.decided_at,
+                bd.decision_status::text,
+                bd.ev,
+                bd.edge,
+                bd.kelly_fraction,
+                bd.stake_fraction,
+                bd.settlement_status::text,
+                bd.settlement_profit_units,
+                mt.kickoff_at,
+                m.market_code,
+                s.selection_code
+              from betting_decisions bd
+              join model_predictions p on p.prediction_id = bd.prediction_id
+              join markets m on m.market_id = p.market_id
+              join market_selections s on s.selection_id = p.selection_id
+              join matches mt on mt.match_id = bd.match_id
+              order by bd.decided_at desc
+              limit :limit
+            )
+            select * from latest
+            order by decided_at asc
             """,
             {"limit": limit},
         )
