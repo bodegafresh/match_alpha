@@ -1,0 +1,20 @@
+app/competitions/team_sync.py
+  s_5464458db59e8d::t_7e619f6a3e44d5 1933
+  s_5464458db59e8d::t_afbca17d914979 1929
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "77d5536b79bb6b60669e51d8ffaaf852ba3f123f",
+  "prompts": {},
+  "sessions": {
+    "s_5464458db59e8d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "07c90802-5b7f-4a48-9c11-612e4c1d71c7",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
