@@ -43,6 +43,30 @@ class Settings(BaseSettings):
     weather_cache_ttl_minutes: int = Field(default=120, alias="WEATHER_CACHE_TTL_MINUTES")
     min_calibration_sample_size: int = Field(default=50, alias="MIN_CALIBRATION_SAMPLE_SIZE")
     max_ece_for_bettable: float = Field(default=0.08, alias="MAX_ECE_FOR_BETTABLE")
+    identity_validation_max_merge_candidates: int = Field(
+        default=500,
+        alias="IDENTITY_VALIDATION_MAX_MERGE_CANDIDATES",
+    )
+    identity_validation_max_candidate_ratio: float = Field(
+        default=0.03,
+        alias="IDENTITY_VALIDATION_MAX_CANDIDATE_RATIO",
+    )
+    identity_validation_max_ambiguous_signatures: int = Field(
+        default=200,
+        alias="IDENTITY_VALIDATION_MAX_AMBIGUOUS_SIGNATURES",
+    )
+    identity_validation_max_team_duplicates: int = Field(
+        default=150,
+        alias="IDENTITY_VALIDATION_MAX_TEAM_DUPLICATES",
+    )
+    identity_validation_max_referee_duplicates: int = Field(
+        default=80,
+        alias="IDENTITY_VALIDATION_MAX_REFEREE_DUPLICATES",
+    )
+    identity_validation_max_venue_duplicates: int = Field(
+        default=80,
+        alias="IDENTITY_VALIDATION_MAX_VENUE_DUPLICATES",
+    )
 
     telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str | None = Field(default=None, alias="TELEGRAM_CHAT_ID")

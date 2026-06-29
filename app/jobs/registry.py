@@ -33,6 +33,16 @@ from app.calibration.evaluator import run_calibration
 from app.feedback.clv_calculator import compute_pending_clv
 from app.feedback.settlement_service import settle_pending_decisions
 from app.models.poisson_predictor import _get_or_create_model_registry, run_poisson_prediction
+from app.normalization.core_entities_dedup import (
+    reconcile_referees_identity,
+    reconcile_teams_identity,
+    reconcile_venues_identity,
+)
+from app.normalization.core_entities_identity import validate_core_entities_identity_consistency
+from app.normalization.player_dedup import (
+    reconcile_players_identity,
+    validate_players_identity_consistency,
+)
 from app.models.ai_adjuster import adjust_predictions_with_ai
 from app.models.drift_detector import detect_drift
 from app.models.lgbm.retraining_pipeline import run_retraining
@@ -1049,8 +1059,20 @@ async def sync_all_leagues_teams_job(conn: AsyncConnection, payload: dict[str, A
 
 async def sync_all_leagues_players_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
     """Weekly: upsert players + squad memberships for all catalog entries with API_FOOTBALL."""
-    _ = payload
-    return await sync_players_for_all_leagues(conn)
+    return await sync_players_for_all_leagues(conn, payload)
+
+
+async def sync_all_leagues_match_entities_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Weekly: ingest stadiums/venues + referees from fixture providers across leagues."""
+    return await sync_players_for_all_leagues(
+        conn,
+        {
+            **payload,
+            "only_match_entities": True,
+            "ingest_referees": True,
+            "ingest_venues": True,
+        },
+    )
 
 
 async def sync_all_leagues_fixtures_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1063,6 +1085,80 @@ async def validate_sync_coverage_all_leagues_job(conn: AsyncConnection, payload:
     """Post-cron validation by league: teams coverage + min players + roster consistency."""
     min_players = int(payload.get("min_players_per_team", 11) or 11)
     return await validate_sync_coverage_for_all_leagues(conn, min_players_per_team=min_players)
+
+
+async def validate_players_identity_all_leagues_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Post-cron validation for player identity consistency (no merge side effects)."""
+    settings = get_settings()
+    validation_payload = {
+        **payload,
+        "max_merge_candidates": int(
+            payload.get(
+                "max_merge_candidates",
+                settings.identity_validation_max_merge_candidates,
+            )
+        ),
+        "max_candidate_ratio": float(
+            payload.get(
+                "max_candidate_ratio",
+                settings.identity_validation_max_candidate_ratio,
+            )
+        ),
+        "max_ambiguous_signatures": int(
+            payload.get(
+                "max_ambiguous_signatures",
+                settings.identity_validation_max_ambiguous_signatures,
+            )
+        ),
+    }
+    return await validate_players_identity_consistency(conn, validation_payload)
+
+
+async def validate_core_entities_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Post-cron validation for teams, referees and venues identity consistency."""
+    settings = get_settings()
+    validation_payload = {
+        **payload,
+        "max_team_duplicates": int(
+            payload.get(
+                "max_team_duplicates",
+                settings.identity_validation_max_team_duplicates,
+            )
+        ),
+        "max_referee_duplicates": int(
+            payload.get(
+                "max_referee_duplicates",
+                settings.identity_validation_max_referee_duplicates,
+            )
+        ),
+        "max_venue_duplicates": int(
+            payload.get(
+                "max_venue_duplicates",
+                settings.identity_validation_max_venue_duplicates,
+            )
+        ),
+    }
+    return await validate_core_entities_identity_consistency(conn, validation_payload)
+
+
+async def reconcile_players_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate and merge players across sources while preserving relationships."""
+    return await reconcile_players_identity(conn, payload)
+
+
+async def reconcile_teams_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate and merge teams across sources while preserving relationships."""
+    return await reconcile_teams_identity(conn, payload)
+
+
+async def reconcile_referees_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate and merge referees across sources while preserving relationships."""
+    return await reconcile_referees_identity(conn, payload)
+
+
+async def reconcile_venues_identity_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate and merge venues across sources while preserving relationships."""
+    return await reconcile_venues_identity(conn, payload)
 
 
 async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1092,9 +1188,16 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "backtest_walk_forward": backtest_job,
         # Multi-league sync
         "sync_all_leagues_teams": sync_all_leagues_teams_job,
+        "sync_all_leagues_match_entities": sync_all_leagues_match_entities_job,
         "sync_all_leagues_players": sync_all_leagues_players_job,
         "sync_all_leagues_fixtures": sync_all_leagues_fixtures_job,
         "validate_sync_coverage_all_leagues": validate_sync_coverage_all_leagues_job,
+        "validate_players_identity_all_leagues": validate_players_identity_all_leagues_job,
+        "validate_core_entities_identity": validate_core_entities_identity_job,
+        "reconcile_players_identity": reconcile_players_identity_job,
+        "reconcile_teams_identity": reconcile_teams_identity_job,
+        "reconcile_referees_identity": reconcile_referees_identity_job,
+        "reconcile_venues_identity": reconcile_venues_identity_job,
         "telegram_daily_summary": telegram_daily_summary_job,
     }
     scaffold_jobs = {

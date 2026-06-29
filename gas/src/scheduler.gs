@@ -147,6 +147,17 @@ function runWeeklyTeamsSync() {
 }
 
 /**
+ * runWeeklyMatchEntitiesSync — corre domingos a las 3 AM UTC.
+ * Sincroniza estadios/referees en un cron separado entre equipos y jugadores.
+ */
+function runWeeklyMatchEntitiesSync() {
+  return logBackendCronResult_(
+    'runWeeklyMatchEntitiesSync',
+    backendFetch_('/api/v1/jobs/orchestrate/weekly-match-entities', { method: 'post', payload: { source: 'gas_weekly_match_entities' } })
+  );
+}
+
+/**
  * runWeeklyPlayersSync — corre lunes a las 2 AM UTC.
  * Sincroniza jugadores y reconcilia rosters en un cron separado del de equipos.
  */
@@ -251,7 +262,8 @@ function runNewsSyncJob() {
  *   - Daily:      1 hora (10 AM UTC = 6 AM Chile, con guard interno de hora+idempotencia)
  *   - Live:       5 min  (actualización frecuente durante partidos WC2026)
  *   - Weekly orchestration: domingo 2 AM UTC (teams only)
- *   - Weekly players orchestration: lunes 2 AM UTC (players + rosters)
+ *   - Weekly match entities: domingo 3 AM UTC (stadiums/referees)
+ *   - Weekly players orchestration: domingo 4 AM UTC (players + rosters)
  */
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();
@@ -290,10 +302,17 @@ function installMatchAlphaTriggers() {
     .inTimezone('UTC')
     .create();
 
+  var weeklyMatchEntities = ScriptApp.newTrigger('runWeeklyMatchEntitiesSync')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
+    .atHour(3)
+    .inTimezone('UTC')
+    .create();
+
   var weeklyPlayers = ScriptApp.newTrigger('runWeeklyPlayersSync')
     .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.MONDAY)
-    .atHour(2)
+    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
+    .atHour(4)
     .inTimezone('UTC')
     .create();
 
@@ -308,10 +327,11 @@ function installMatchAlphaTriggers() {
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC', weekly.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'MATCH_ENTITIES_SYNC', weeklyMatchEntities.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC', weeklyPlayers.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'MORNING_SUMMARY', morningSummary.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM players=lunes-2AM morning_summary=1h@12UTC');
+  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM match_entities=domingo-3AM players=domingo-4AM morning_summary=1h@12UTC');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
@@ -319,6 +339,7 @@ function installMatchAlphaTriggers() {
     daily_trigger_id: daily.getUniqueId(),
     live_trigger_id: live.getUniqueId(),
     teams_sync_trigger_id: weekly.getUniqueId(),
+    match_entities_sync_trigger_id: weeklyMatchEntities.getUniqueId(),
     players_sync_trigger_id: weeklyPlayers.getUniqueId(),
     morning_summary_trigger_id: morningSummary.getUniqueId()
   };

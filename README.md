@@ -64,6 +64,31 @@ curl -X POST "$API_URL/api/v1/jobs/telegram_daily_summary/run" \
   -H "Authorization: Bearer $API_INTERNAL_KEY" \
   -H "Content-Type: application/json" \
   -d '{"source":"manual_ops","ev_limit":8}'
+
+curl -X POST "$API_URL/api/v1/jobs/reconcile_players_identity/run" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":true,"limit_merges":1000}'
+
+curl -X POST "$API_URL/api/v1/jobs/reconcile_players_identity/run" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":false,"limit_merges":1000}'
+
+curl -X POST "$API_URL/api/v1/jobs/reconcile_teams_identity/run" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":true,"limit_merges":500}'
+
+curl -X POST "$API_URL/api/v1/jobs/reconcile_referees_identity/run" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":true,"limit_merges":300}'
+
+curl -X POST "$API_URL/api/v1/jobs/reconcile_venues_identity/run" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":true,"limit_merges":300}'
 ```
 
 Telegram:
@@ -87,10 +112,17 @@ Validacion de cobertura (`validate_sync_coverage_all_leagues`):
   - `POST /api/v1/jobs/orchestrate/weekly`
 - Flujo semanal backend:
   - `sync_all_leagues_teams`
+- Trigger GAS semanal de estadios/referees (`runWeeklyMatchEntitiesSync`) ejecuta:
+  - `POST /api/v1/jobs/orchestrate/weekly-match-entities`
+- Flujo semanal de entidades backend:
+  - `sync_all_leagues_match_entities` -> `validate_core_entities_identity` -> `reconcile_referees_identity` -> `reconcile_venues_identity`
 - Trigger GAS semanal de jugadores (`runWeeklyPlayersSync`) ejecuta:
   - `POST /api/v1/jobs/orchestrate/weekly-players`
 - Flujo semanal de jugadores backend:
-  - `sync_all_leagues_players` -> `validate_sync_coverage_all_leagues`
+  - `sync_all_leagues_players` (sin ingesta de venues/referees en esta fase) ->
+  - `validate_players_identity_all_leagues` -> `validate_core_entities_identity` -> `validate_sync_coverage_all_leagues` ->
+  - `reconcile_teams_identity` -> `reconcile_referees_identity` -> `reconcile_venues_identity`
+  - El orquestador aplica presupuesto de tiempo (< 5 min) y limites de merge para evitar timeout de GAS.
 
 Diagnostico canonical (duplicados/ambiguedades):
 - `supabase/diagnostics/diag_canonical_duplicates_and_resolution.sql`
@@ -108,6 +140,25 @@ curl -X POST "$API_URL/api/v1/jobs/validate_sync_coverage_all_leagues/run" \
   -H "Authorization: Bearer $API_INTERNAL_KEY" \
   -H "Content-Type: application/json" \
   -d '{"source":"manual_recovery","min_players_per_team":11}'
+
+Normalizacion/merge de jugadores duplicados:
+- Job: `reconcile_players_identity`
+- Objetivo: unificar jugadores cargados desde multiples fuentes y mantener consistencia referencial en:
+  - `player_aliases`, `entity_external_refs`, `team_memberships`, `competition_rosters`,
+  - `match_lineups`, `player_match_stats`, `match_events`, `entity_resolution_queue`.
+- Recomendacion operativa:
+  - 1) ejecutar `dry_run=true`,
+  - 2) revisar `merge_plan`,
+  - 3) ejecutar merge real (`dry_run=false`) en ventana controlada.
+
+Normalizacion/merge de entidades core duplicadas:
+- Jobs:
+  - `reconcile_teams_identity`
+  - `reconcile_referees_identity`
+  - `reconcile_venues_identity`
+- Operacion recomendada:
+  - ejecutar primero `dry_run=true` y revisar `merge_plan`,
+  - luego ejecutar merge real (`dry_run=false`) por lotes acotados.
 ```
 
 ## Reglas Cuantitativas Implementadas En MVP

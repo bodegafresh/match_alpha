@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-import unicodedata
+from time import perf_counter
 from typing import Any
 
 from sqlalchemy import text
@@ -21,6 +20,7 @@ from app.competitions.catalog import supported_competitions
 from app.core.config import get_settings
 from app.core.time import iso_utc
 from app.db.repositories.observability import ObservabilityRepository
+from app.normalization.player_identity import normalize_identity_name
 from app.normalization.team_normalizer import slugify_name
 
 log = logging.getLogger(__name__)
@@ -34,10 +34,7 @@ def _json(value: Any) -> str:
 
 
 def _norm(name: str) -> str:
-    s = unicodedata.normalize("NFD", str(name or ""))
-    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
-    s = re.sub(r"[^a-zA-Z0-9]+", " ", s).strip().lower()
-    return re.sub(r"\s+", " ", s)
+    return normalize_identity_name(name)
 
 
 def _slug(name: str) -> str:
@@ -721,13 +718,24 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
     }
 
 
-async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
+async def sync_players_for_all_leagues(conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Upsert players and competition rosters for every catalog entry using source priority.
 
     Players API is paginated. We iterate pages until paging.current == paging.total.
     This is rate-limit aware: if no API key is configured the loop is skipped gracefully.
     """
     settings = get_settings()
+    payload = payload or {}
+    max_runtime_seconds = int(payload.get("max_runtime_seconds", 210) or 210)
+    ingest_referees = bool(payload.get("ingest_referees", True))
+    ingest_venues = bool(payload.get("ingest_venues", True))
+    only_match_entities = bool(payload.get("only_match_entities", False))
+    max_api_football_last_fixtures = int(payload.get("max_api_football_last_fixtures", 20) or 20)
+    max_sportmonks_fixture_pages = int(payload.get("max_sportmonks_fixture_pages", 1) or 1)
+    started_at = perf_counter()
+
+    def _time_budget_exceeded() -> bool:
+        return (perf_counter() - started_at) >= max_runtime_seconds
     if not settings.api_football_key and not settings.football_data_token and not settings.sportmonks_api_token:
         return {
             "status": "WARN",
@@ -982,6 +990,466 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             },
         )
 
+    async def _resolve_match_id_for_source(source: str, source_match_id: str) -> str | None:
+        if not source_match_id:
+            return None
+        row = await conn.execute(
+            text(
+                """
+                SELECT entity_id::text
+                FROM entity_external_refs
+                WHERE entity_type = 'MATCH'
+                  AND source = :source
+                  AND source_entity_id = :source_match_id
+                LIMIT 1
+                """
+            ),
+            {"source": source, "source_match_id": source_match_id},
+        )
+        return row.scalar_one_or_none()
+
+    async def _upsert_venue_external_ref(venue_id: str, source: str, source_venue_id: str, source_venue_name: str) -> None:
+        await conn.execute(
+            text(
+                """
+                INSERT INTO entity_external_refs
+                  (entity_type, entity_id, source, source_entity_type, source_entity_id, source_entity_name, confidence, is_primary, payload)
+                VALUES
+                  ('VENUE', cast(:venue_id as uuid), :source, 'venue', :source_venue_id, :source_venue_name, 1, true,
+                   cast(:payload as jsonb))
+                ON CONFLICT (entity_type, source, source_entity_id) DO UPDATE SET
+                  entity_id = excluded.entity_id,
+                  source_entity_name = excluded.source_entity_name,
+                  confidence = excluded.confidence,
+                  payload = entity_external_refs.payload || excluded.payload,
+                  updated_at = now()
+                """
+            ),
+            {
+                "venue_id": venue_id,
+                "source": source,
+                "source_venue_id": source_venue_id,
+                "source_venue_name": source_venue_name,
+                "payload": _json({"resolver": "match_entities_sync", "source": source}),
+            },
+        )
+
+    async def _resolve_or_create_venue(
+        *,
+        source: str,
+        source_venue_id: str,
+        display_name: str,
+        city: str | None,
+        country_code: str | None,
+        timezone_name: str | None,
+        latitude: float | None,
+        longitude: float | None,
+        metadata: dict[str, Any],
+    ) -> str:
+        venue_id: str | None = None
+        if source_venue_id:
+            row = await conn.execute(
+                text(
+                    """
+                    SELECT entity_id::text
+                    FROM entity_external_refs
+                    WHERE entity_type = 'VENUE'
+                      AND source = :source
+                      AND source_entity_id = :source_venue_id
+                    LIMIT 1
+                    """
+                ),
+                {"source": source, "source_venue_id": source_venue_id},
+            )
+            venue_id = row.scalar_one_or_none()
+
+        if not venue_id:
+            row = await conn.execute(
+                text(
+                    """
+                    SELECT venue_id::text
+                    FROM venues
+                    WHERE lower(display_name) = lower(:display_name)
+                      AND coalesce(lower(city), '') = coalesce(lower(:city), '')
+                      AND coalesce(country_code, '') = coalesce(:country_code, '')
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "display_name": display_name,
+                    "city": city,
+                    "country_code": country_code,
+                },
+            )
+            venue_id = row.scalar_one_or_none()
+
+        if not venue_id:
+            slug = f"{_slug(display_name)}-{(city or 'na').lower()}"[:180]
+            created = await conn.execute(
+                text(
+                    """
+                    INSERT INTO venues
+                      (slug, display_name, city, country_code, timezone_name, latitude, longitude, metadata)
+                    VALUES
+                      (:slug, :display_name, :city, :country_code, :timezone_name, :latitude, :longitude, cast(:metadata as jsonb))
+                    RETURNING venue_id::text
+                    """
+                ),
+                {
+                    "slug": slug,
+                    "display_name": display_name,
+                    "city": city,
+                    "country_code": country_code,
+                    "timezone_name": timezone_name,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "metadata": _json(metadata),
+                },
+            )
+            venue_id = created.scalar_one()
+        else:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE venues
+                    SET display_name = COALESCE(:display_name, display_name),
+                        city = COALESCE(:city, city),
+                        country_code = COALESCE(:country_code, country_code),
+                        timezone_name = COALESCE(:timezone_name, timezone_name),
+                        latitude = COALESCE(:latitude, latitude),
+                        longitude = COALESCE(:longitude, longitude),
+                        metadata = venues.metadata || cast(:metadata as jsonb),
+                        updated_at = now()
+                    WHERE venue_id = cast(:venue_id as uuid)
+                    """
+                ),
+                {
+                    "venue_id": venue_id,
+                    "display_name": display_name,
+                    "city": city,
+                    "country_code": country_code,
+                    "timezone_name": timezone_name,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "metadata": _json(metadata),
+                },
+            )
+
+        if source_venue_id:
+            await _upsert_venue_external_ref(venue_id, source, source_venue_id, display_name)
+        return venue_id
+
+    async def _upsert_referee_external_ref(referee_id: str, source: str, source_referee_id: str, source_referee_name: str) -> None:
+        await conn.execute(
+            text(
+                """
+                INSERT INTO entity_external_refs
+                  (entity_type, entity_id, source, source_entity_type, source_entity_id, source_entity_name, confidence, is_primary, payload)
+                VALUES
+                  ('REFEREE', cast(:referee_id as uuid), :source, 'referee', :source_referee_id, :source_referee_name, 1, true,
+                   cast(:payload as jsonb))
+                ON CONFLICT (entity_type, source, source_entity_id) DO UPDATE SET
+                  entity_id = excluded.entity_id,
+                  source_entity_name = excluded.source_entity_name,
+                  confidence = excluded.confidence,
+                  payload = entity_external_refs.payload || excluded.payload,
+                  updated_at = now()
+                """
+            ),
+            {
+                "referee_id": referee_id,
+                "source": source,
+                "source_referee_id": source_referee_id,
+                "source_referee_name": source_referee_name,
+                "payload": _json({"resolver": "match_entities_sync", "source": source}),
+            },
+        )
+
+    async def _resolve_or_create_referee(
+        *,
+        source: str,
+        source_referee_id: str,
+        display_name: str,
+        nationality_country_code: str | None,
+        metadata: dict[str, Any],
+    ) -> str:
+        referee_id: str | None = None
+        if source_referee_id:
+            row = await conn.execute(
+                text(
+                    """
+                    SELECT entity_id::text
+                    FROM entity_external_refs
+                    WHERE entity_type = 'REFEREE'
+                      AND source = :source
+                      AND source_entity_id = :source_referee_id
+                    LIMIT 1
+                    """
+                ),
+                {"source": source, "source_referee_id": source_referee_id},
+            )
+            referee_id = row.scalar_one_or_none()
+
+        if not referee_id:
+            row = await conn.execute(
+                text(
+                    """
+                    SELECT referee_id::text
+                    FROM referees
+                    WHERE normalized_name = :normalized_name
+                      AND (
+                        :nationality_country_code is null
+                        OR nationality_country_code = :nationality_country_code
+                      )
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "normalized_name": _norm(display_name),
+                    "nationality_country_code": nationality_country_code,
+                },
+            )
+            referee_id = row.scalar_one_or_none()
+
+        if not referee_id:
+            slug = f"{_slug(display_name)}-{source.lower()}-{source_referee_id or _slug(display_name)}"[:180]
+            created = await conn.execute(
+                text(
+                    """
+                    INSERT INTO referees
+                      (slug, display_name, normalized_name, nationality_country_code, metadata)
+                    VALUES
+                      (:slug, :display_name, :normalized_name, :nationality_country_code, cast(:metadata as jsonb))
+                    RETURNING referee_id::text
+                    """
+                ),
+                {
+                    "slug": slug,
+                    "display_name": display_name,
+                    "normalized_name": _norm(display_name),
+                    "nationality_country_code": nationality_country_code,
+                    "metadata": _json(metadata),
+                },
+            )
+            referee_id = created.scalar_one()
+        else:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE referees
+                    SET display_name = COALESCE(:display_name, display_name),
+                        normalized_name = COALESCE(:normalized_name, normalized_name),
+                        nationality_country_code = COALESCE(:nationality_country_code, nationality_country_code),
+                        metadata = referees.metadata || cast(:metadata as jsonb),
+                        updated_at = now()
+                    WHERE referee_id = cast(:referee_id as uuid)
+                    """
+                ),
+                {
+                    "referee_id": referee_id,
+                    "display_name": display_name,
+                    "normalized_name": _norm(display_name),
+                    "nationality_country_code": nationality_country_code,
+                    "metadata": _json(metadata),
+                },
+            )
+
+        if source_referee_id:
+            await _upsert_referee_external_ref(referee_id, source, source_referee_id, display_name)
+        return referee_id
+
+    async def _upsert_match_official(match_id: str, referee_id: str, role: str, metadata: dict[str, Any]) -> None:
+        await conn.execute(
+            text(
+                """
+                INSERT INTO match_officials
+                  (match_id, referee_id, role, metadata)
+                VALUES
+                  (cast(:match_id as uuid), cast(:referee_id as uuid), cast(:role as official_role), cast(:metadata as jsonb))
+                ON CONFLICT (match_id, referee_id, role) DO UPDATE SET
+                  metadata = match_officials.metadata || excluded.metadata
+                """
+            ),
+            {
+                "match_id": match_id,
+                "referee_id": referee_id,
+                "role": role,
+                "metadata": _json(metadata),
+            },
+        )
+
+    def _normalize_official_role(value: str | None) -> str:
+        role = str(value or "").strip().upper().replace(" ", "_")
+        mapping = {
+            "REFEREE": "REFEREE",
+            "MAIN": "REFEREE",
+            "ASSISTANT": "ASSISTANT_REFEREE",
+            "ASSISTANT_REFEREE": "ASSISTANT_REFEREE",
+            "VAR": "VAR",
+            "FOURTH_OFFICIAL": "FOURTH_OFFICIAL",
+            "FOURTH": "FOURTH_OFFICIAL",
+        }
+        return mapping.get(role, "OTHER")
+
+    async def _ingest_match_entities_for_league(entry_slug: str, league_id: str | None, season_year: str, selected_source: str | None) -> dict[str, int]:
+        stats = {"venues_upserted": 0, "referees_upserted": 0, "official_links": 0}
+        if not ingest_referees and not ingest_venues:
+            return stats
+        if _time_budget_exceeded():
+            return stats
+
+        if selected_source == "SPORTMONKS" and sportmonks_client:
+            try:
+                pages = max(1, max_sportmonks_fixture_pages)
+                for page in range(1, pages + 1):
+                    if _time_budget_exceeded():
+                        break
+                    data = await sportmonks_client.fixtures(
+                        include="venue;referees",
+                        page=page,
+                        per_page=50,
+                    )
+                    fixtures = data.get("data") or []
+                    if not fixtures:
+                        break
+                    for fixture in fixtures:
+                        if _time_budget_exceeded():
+                            break
+                        source_match_id = str(fixture.get("id") or "")
+                        match_id = await _resolve_match_id_for_source("SPORTMONKS", source_match_id)
+                        venue = fixture.get("venue") if isinstance(fixture.get("venue"), dict) else {}
+                        if ingest_venues and venue:
+                            venue_id = await _resolve_or_create_venue(
+                                source="SPORTMONKS",
+                                source_venue_id=str(venue.get("id") or ""),
+                                display_name=str(venue.get("name") or "Unknown Venue"),
+                                city=venue.get("city_name") or venue.get("city"),
+                                country_code=await _resolve_country_code(conn, venue.get("country_name") or venue.get("country"), country_cache),
+                                timezone_name=venue.get("timezone"),
+                                latitude=venue.get("latitude"),
+                                longitude=venue.get("longitude"),
+                                metadata={"source": "SPORTMONKS", "league": entry_slug},
+                            )
+                            if venue_id:
+                                stats["venues_upserted"] += 1
+                                if match_id:
+                                    await conn.execute(
+                                        text(
+                                            """
+                                            UPDATE matches
+                                            SET venue_id = cast(:venue_id as uuid),
+                                                updated_at = now()
+                                            WHERE match_id = cast(:match_id as uuid)
+                                            """
+                                        ),
+                                        {"match_id": match_id, "venue_id": venue_id},
+                                    )
+
+                        if ingest_referees:
+                            for ref in _sportmonks_items(fixture, "referees"):
+                                display_name = str(ref.get("name") or "").strip()
+                                if not display_name:
+                                    continue
+                                referee_id = await _resolve_or_create_referee(
+                                    source="SPORTMONKS",
+                                    source_referee_id=str(ref.get("id") or ""),
+                                    display_name=display_name,
+                                    nationality_country_code=await _resolve_country_code(conn, ref.get("country") or ref.get("nationality"), country_cache),
+                                    metadata={"source": "SPORTMONKS", "league": entry_slug},
+                                )
+                                stats["referees_upserted"] += 1
+                                if match_id:
+                                    await _upsert_match_official(
+                                        match_id,
+                                        referee_id,
+                                        _normalize_official_role(ref.get("type") or ref.get("role")),
+                                        {"source": "SPORTMONKS", "league": entry_slug},
+                                    )
+                                    stats["official_links"] += 1
+            except Exception as exc:
+                errors.append(f"{entry_slug} sportmonks entities: {exc}")
+            return stats
+
+        if league_id and api_football_client:
+            try:
+                if not await _api_football_has_budget(conn, settings):
+                    return stats
+                data = await api_football_client.fixtures(
+                    league=int(league_id),
+                    season=int(season_year),
+                    last_count=max(1, max_api_football_last_fixtures),
+                )
+                fixtures = data.get("response") or []
+                await _record_api_call(
+                    conn,
+                    source="API_FOOTBALL",
+                    endpoint="fixtures",
+                    request_hash=f"entities:league={league_id}:season={season_year}:last={max_api_football_last_fixtures}",
+                    request_payload={"league": int(league_id), "season": int(season_year), "last": int(max_api_football_last_fixtures)},
+                    response_status=200,
+                    response_hash=str(len(fixtures)),
+                    payload={"league": entry_slug, "fixtures": len(fixtures)},
+                )
+                for fixture in fixtures:
+                    if _time_budget_exceeded():
+                        break
+                    fixture_node = fixture.get("fixture") or {}
+                    source_match_id = str(fixture_node.get("id") or "")
+                    match_id = await _resolve_match_id_for_source("API_FOOTBALL", source_match_id)
+
+                    venue = fixture_node.get("venue") or {}
+                    if ingest_venues and venue:
+                        venue_id = await _resolve_or_create_venue(
+                            source="API_FOOTBALL",
+                            source_venue_id=str(venue.get("id") or ""),
+                            display_name=str(venue.get("name") or "Unknown Venue"),
+                            city=venue.get("city"),
+                            country_code=None,
+                            timezone_name=fixture_node.get("timezone"),
+                            latitude=None,
+                            longitude=None,
+                            metadata={"source": "API_FOOTBALL", "league": entry_slug},
+                        )
+                        if venue_id:
+                            stats["venues_upserted"] += 1
+                            if match_id:
+                                await conn.execute(
+                                    text(
+                                        """
+                                        UPDATE matches
+                                        SET venue_id = cast(:venue_id as uuid),
+                                            updated_at = now()
+                                        WHERE match_id = cast(:match_id as uuid)
+                                        """
+                                    ),
+                                    {"match_id": match_id, "venue_id": venue_id},
+                                )
+
+                    if ingest_referees:
+                        referee_name = str(fixture_node.get("referee") or "").strip()
+                        if referee_name:
+                            referee_id = await _resolve_or_create_referee(
+                                source="API_FOOTBALL",
+                                source_referee_id=source_match_id,
+                                display_name=referee_name,
+                                nationality_country_code=None,
+                                metadata={"source": "API_FOOTBALL", "league": entry_slug},
+                            )
+                            stats["referees_upserted"] += 1
+                            if match_id:
+                                await _upsert_match_official(
+                                    match_id,
+                                    referee_id,
+                                    "REFEREE",
+                                    {"source": "API_FOOTBALL", "league": entry_slug},
+                                )
+                                stats["official_links"] += 1
+            except Exception as exc:
+                errors.append(f"{entry_slug} api-football entities: {exc}")
+        return stats
+
     async def _reconcile_removed_rosters(active_pairs: list[dict[str, str]], source: str) -> int:
         if not active_pairs:
             result = await conn.execute(
@@ -1041,6 +1509,7 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
     football_data_client = FootballDataClient() if settings.football_data_token else None
     sportmonks_client = SportmonksClient() if settings.sportmonks_api_token else None
     total_players = 0
+    total_entities = 0
     errors: list[str] = []
     skipped: list[dict[str, str]] = []
     league_stats: list[dict[str, Any]] = []
@@ -1058,6 +1527,9 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         }
 
     for entry in supported_competitions():
+        if _time_budget_exceeded():
+            skipped.append({"league": entry.slug, "reason": "TIME_BUDGET_EXCEEDED"})
+            continue
         league_id = entry.source.external_ids.get("API_FOOTBALL")
         football_data_code = entry.source.external_ids.get("FOOTBALL_DATA")
         has_sportmonks_players_capability = "players" in (entry.source.capabilities.get("SPORTMONKS") or [])
@@ -1090,9 +1562,64 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         league_processed = 0
         league_errors = 0
         pages_processed = 0
+        entity_stats = {"venues_upserted": 0, "referees_upserted": 0, "official_links": 0}
         active_pairs: list[dict[str, str]] = []
         selected_source: str | None = None
         source_attempts: list[dict[str, str]] = []
+
+        if only_match_entities:
+            if league_id and api_football_client and "venues" in (entry.source.capabilities.get("API_FOOTBALL") or []):
+                selected_source = "API_FOOTBALL"
+                source_attempts.append({"source": "API_FOOTBALL", "reason": "SELECTED_ENTITIES"})
+            elif sportmonks_client and "venues" in (entry.source.capabilities.get("SPORTMONKS") or []):
+                selected_source = "SPORTMONKS"
+                source_attempts.append({"source": "SPORTMONKS", "reason": "SELECTED_ENTITIES"})
+            else:
+                source_attempts.append({"source": "ALL", "reason": "NO_SOURCE_WITH_ENTITIES_DATA"})
+
+            if selected_source is not None and not _time_budget_exceeded() and (ingest_referees or ingest_venues):
+                entity_stats = await _ingest_match_entities_for_league(
+                    entry_slug=entry.slug,
+                    league_id=str(league_id) if league_id else None,
+                    season_year=season_year,
+                    selected_source=selected_source,
+                )
+                total_entities += int(entity_stats["venues_upserted"]) + int(entity_stats["referees_upserted"]) + int(entity_stats["official_links"])
+                league_status = "OK" if (entity_stats["venues_upserted"] + entity_stats["referees_upserted"] + entity_stats["official_links"]) > 0 else "WARN"
+            else:
+                league_status = "WARN"
+
+            league_stats.append(
+                {
+                    "league": entry.slug,
+                    "status": league_status,
+                    "source": selected_source,
+                    "players_processed": 0,
+                    "pages_processed": 0,
+                    "errors": league_errors,
+                    "rosters_deactivated": 0,
+                    "venues_upserted": entity_stats["venues_upserted"],
+                    "referees_upserted": entity_stats["referees_upserted"],
+                    "official_links": entity_stats["official_links"],
+                    "source_attempts": source_attempts,
+                }
+            )
+            await _record_sync_event(
+                conn,
+                "INFO" if league_status == "OK" else "WARN",
+                "MATCH_ENTITIES_SYNC_LEAGUE_RESULT",
+                f"match entities sync completed for {entry.slug}",
+                {
+                    "league": entry.slug,
+                    "source": selected_source,
+                    "venues_upserted": entity_stats["venues_upserted"],
+                    "referees_upserted": entity_stats["referees_upserted"],
+                    "official_links": entity_stats["official_links"],
+                    "status": league_status,
+                    "source_attempts": source_attempts,
+                },
+            )
+            continue
 
         if league_id and api_football_client and "players" in (entry.source.capabilities.get("API_FOOTBALL") or []):
             page = 1
@@ -1436,6 +1963,15 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             skipped.append({"league": entry.slug, "reason": "NO_SOURCE_WITH_PLAYER_DATA"})
             source_attempts.append({"source": "ALL", "reason": "NO_SOURCE_WITH_PLAYER_DATA"})
 
+        if selected_source is not None and not _time_budget_exceeded() and (ingest_referees or ingest_venues):
+            entity_stats = await _ingest_match_entities_for_league(
+                entry_slug=entry.slug,
+                league_id=str(league_id) if league_id else None,
+                season_year=season_year,
+                selected_source=selected_source,
+            )
+            total_entities += int(entity_stats["venues_upserted"]) + int(entity_stats["referees_upserted"]) + int(entity_stats["official_links"])
+
         deactivated_rosters = 0
         if selected_source is not None:
             deactivated_rosters = await _reconcile_removed_rosters(active_pairs, selected_source)
@@ -1456,6 +1992,9 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                 "pages_processed": pages_processed,
                 "errors": league_errors,
                 "rosters_deactivated": deactivated_rosters,
+                "venues_upserted": entity_stats["venues_upserted"],
+                "referees_upserted": entity_stats["referees_upserted"],
+                "official_links": entity_stats["official_links"],
                 "source_attempts": source_attempts,
             }
         )
@@ -1471,6 +2010,9 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                 "pages_processed": pages_processed,
                 "errors": league_errors,
                 "rosters_deactivated": deactivated_rosters,
+                "venues_upserted": entity_stats["venues_upserted"],
+                "referees_upserted": entity_stats["referees_upserted"],
+                "official_links": entity_stats["official_links"],
                 "status": league_status,
                 "source_attempts": source_attempts,
             },
@@ -1491,13 +2033,16 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         "warn_leagues": len([s for s in league_stats if s.get("status") == "WARN"]),
         "error_leagues": len([s for s in league_stats if s.get("status") == "ERROR"]),
         "skipped_leagues": len(skipped),
+        "max_runtime_seconds": max_runtime_seconds,
+        "elapsed_seconds": int(perf_counter() - started_at),
     }
     return {
         "status": status,
         "job_name": "sync_all_leagues_players",
         "schema_mode": schema_mode,
-        "records_processed": total_players,
+        "records_processed": total_players + total_entities,
         "summary": summary,
+        "entities_processed": total_entities,
         "league_stats": league_stats[:200],
         "skipped": skipped[:200],
         "errors": errors[:20],

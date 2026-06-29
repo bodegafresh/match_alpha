@@ -53,6 +53,14 @@ async def orchestrate_weekly_players(
     return await JobOrchestrator(conn).weekly_players()
 
 
+@router.post("/orchestrate/weekly-match-entities")
+async def orchestrate_weekly_match_entities(
+    _: None = Depends(require_internal_key),
+    conn: AsyncConnection = Depends(get_connection),
+) -> dict:
+    return await JobOrchestrator(conn).weekly_match_entities()
+
+
 @router.get("/status/latest")
 async def latest_job_status(
     _: None = Depends(require_internal_key),
