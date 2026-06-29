@@ -1,0 +1,37 @@
+app/jobs/orchestrator.py
+  s_470526d6dc3738::t_7c37fa530f9b08 56
+  s_470526d6dc3738::t_4e11b2dcc73a51 231,315-331
+app/clients/api_football_client.py
+  s_470526d6dc3738::t_eda89778ceda00 65-76
+app/jobs/registry.py
+  s_470526d6dc3738::t_0c49a459cde1ff 24,1087-1091,1207
+  s_470526d6dc3738::t_ba75dc597af39b 157
+tests/test_espn_normalization.py
+  s_470526d6dc3738::t_50c5cf8459a020 1-59
+app/feedback/settlement_service.py
+  s_470526d6dc3738::t_98db78f6d1b68b 85,118
+tests/test_orchestrator_context_refresh.py
+  s_470526d6dc3738::t_18000ad4c16b34 1,4,16-93
+  s_470526d6dc3738::t_5ae9ac82096a60 2-3,5-15
+app/competitions/service.py
+  s_470526d6dc3738::t_2cb4df4af32c8f 553-554,570,575-576,812-828,830-832,834,836,841-857
+app/competitions/finished_match_stats.py
+  s_470526d6dc3738::t_ebf14df0b08549 1-4,6-135,137-452,455-709,711-797
+  s_470526d6dc3738::t_420edcb832fd16 5,136,453-454,710
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "6df3323a35f001f0d467c33059fe27f337df7a6c",
+  "prompts": {},
+  "sessions": {
+    "s_470526d6dc3738": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "527f0604-de42-4674-8592-6b91fd97cdfc",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
