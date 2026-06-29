@@ -851,7 +851,7 @@ async def competition_layout(
         _navigation_item("ev", "EV+", True, 70),
         _navigation_item("model", "Modelo", True, 80),
         _navigation_item("stats", "Stats", True, 90),
-        _navigation_item("bracket", "Eliminatorias", has_knockout, 400),
+        _navigation_item("bracket", "Eliminatorias", has_knockout and not has_tournament, 400),
     ]
     fallback_by_key = {item["key"]: item for item in fallback_nav}
     navigation = []
@@ -873,6 +873,11 @@ async def competition_layout(
                     "order": int(item.get("order", base["order"])),
                 }
             )
+        configured_keys = {str(item.get("key") if isinstance(item, dict) else item) for item in configured_nav if (isinstance(item, str) or (isinstance(item, dict) and item.get("key")))}
+        for item in fallback_nav:
+            if item["key"] in configured_keys:
+                continue
+            navigation.append(item)
     else:
         navigation = fallback_nav
     navigation = sorted([item for item in navigation if item["enabled"]], key=lambda item: item["order"])
