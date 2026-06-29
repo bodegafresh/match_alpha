@@ -1926,11 +1926,11 @@ async def sync_players_for_all_leagues(conn: AsyncConnection, payload: dict[str,
                                         },
                                     )
                                     await _upsert_team_membership(player_id, team_id, "SPORTMONKS")
-                                        candidate_active_pairs.append({"team_id": team_id, "player_id": player_id})
+                                    candidate_active_pairs.append({"team_id": team_id, "player_id": player_id})
 
                             total_players += 1
                             league_processed += 1
-                                    sportmonks_players_processed += 1
+                            sportmonks_players_processed += 1
                         except Exception as exc:
                             log.warning("player_sync: sportmonks upsert failed slug=%s player=%s err=%s", entry.slug, player_name, exc)
                             errors.append(f"{entry.slug}/{player_name}: {exc}")
