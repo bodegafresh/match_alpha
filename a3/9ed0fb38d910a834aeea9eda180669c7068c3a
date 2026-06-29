@@ -1,0 +1,30 @@
+gas/src/scheduler.gs
+  s_5464458db59e8d::t_aabc093e2d7ad9 140,242
+app/jobs/orchestrator.py
+  s_5464458db59e8d::t_f180a578215029 88
+app/competitions/team_sync.py
+  s_5464458db59e8d::t_46dfbd027dc03e 516-804,810,850,885-902,906,909-910,923,930,934-940,943-946,958-959,974,987
+  s_5464458db59e8d::t_35ab36c3f28739 22,42-43,53-286,339,410-427
+supabase/migrations/027_seed_countries_extended.sql
+  s_5464458db59e8d::t_a7f9227111b01f 1-101
+app/core/config.py
+  s_5464458db59e8d::t_73f6f432521412 33
+README.md
+  s_5464458db59e8d::t_fae4e7aad7055d 73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "a39ed0fb38d910a834aeea9eda180669c7068c3a",
+  "prompts": {},
+  "sessions": {
+    "s_5464458db59e8d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "07c90802-5b7f-4a48-9c11-612e4c1d71c7",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
