@@ -1,0 +1,28 @@
+app/competitions/team_sync.py
+  s_5464458db59e8d::t_ffe6fa95c08ed1 219-242,264-286
+tests/test_team_normalizer.py
+  s_5464458db59e8d::t_7003a76845f49e 11-16
+app/news/context_pipeline.py
+  s_5464458db59e8d::t_98563b0da32482 625,632-633
+app/normalization/team_normalizer.py
+  s_5464458db59e8d::t_76fd4b587c4273 18-21
+supabase/migrations/029_fix_cabo_verde_team_identity.sql
+  s_5464458db59e8d::t_54fc1ee04b0953 1-159
+  s_5464458db59e8d::t_19bdcd7569f88f 160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "229337ff70d790405039abce7be260c5b3b24acf",
+  "prompts": {},
+  "sessions": {
+    "s_5464458db59e8d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "07c90802-5b7f-4a48-9c11-612e4c1d71c7",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
