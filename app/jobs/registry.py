@@ -47,6 +47,7 @@ from app.models.ai_adjuster import adjust_predictions_with_ai
 from app.models.drift_detector import detect_drift
 from app.models.lgbm.retraining_pipeline import run_retraining
 from app.services.notifications.telegram import notify_text
+from app.news.context_pipeline import build_news_context
 
 JobFn = Callable[[AsyncConnection, dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -1161,6 +1162,11 @@ async def reconcile_venues_identity_job(conn: AsyncConnection, payload: dict[str
     return await reconcile_venues_identity(conn, payload)
 
 
+async def news_context_extract_job(conn: AsyncConnection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract structured lineup/injury/suspension context from news bodies and resolve players to local IDs."""
+    return await build_news_context(conn, payload)
+
+
 async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     jobs: dict[str, JobFn] = {
@@ -1198,6 +1204,7 @@ async def run_registered_job(job_name: str, conn: AsyncConnection, payload: dict
         "reconcile_teams_identity": reconcile_teams_identity_job,
         "reconcile_referees_identity": reconcile_referees_identity_job,
         "reconcile_venues_identity": reconcile_venues_identity_job,
+        "news_context_extract": news_context_extract_job,
         "telegram_daily_summary": telegram_daily_summary_job,
     }
     scaffold_jobs = {

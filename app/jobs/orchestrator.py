@@ -59,6 +59,7 @@ class JobOrchestrator:
             OrchestratedJob("results_settlement", requires_finished_matches=True),
             OrchestratedJob("elo_ratings_update", requires_finished_matches=True),
             OrchestratedJob("feature_snapshot_build", requires_upcoming_matches=True),
+            OrchestratedJob("news_context_extract", requires_upcoming_matches=True),
             OrchestratedJob("model_recompute", requires_upcoming_matches=True),
             OrchestratedJob("ev_decision", requires_predictions=True, requires_odds=False),
             OrchestratedJob("calibration_recompute", requires_finished_matches=True),

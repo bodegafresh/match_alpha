@@ -31,6 +31,7 @@ python -m app.cli.run_job model_promotion
 python -m app.cli.run_job sync_all_leagues_teams
 python -m app.cli.run_job sync_all_leagues_players
 python -m app.cli.run_job validate_sync_coverage_all_leagues
+python -m app.cli.run_job news_context_extract
 python -m app.cli.run_job telegram_daily_summary
 ```
 
@@ -89,6 +90,16 @@ curl -X POST "$API_URL/api/v1/jobs/reconcile_venues_identity/run" \
   -H "Authorization: Bearer $API_INTERNAL_KEY" \
   -H "Content-Type: application/json" \
   -d '{"dry_run":true,"limit_merges":300}'
+
+curl -X POST "$API_URL/api/v1/jobs/news_context_extract/run" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"manual_ops_news_context","limit":12}'
+
+curl -X POST "$API_URL/api/v1/jobs/news_context_extract/run" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"manual_ops_news_context","match_id":"<MATCH_UUID>"}'
 ```
 
 Telegram:
@@ -118,6 +129,7 @@ Validacion de cobertura (`validate_sync_coverage_all_leagues`):
   - `sync_all_leagues_match_entities` -> `validate_core_entities_identity` -> `reconcile_referees_identity` -> `reconcile_venues_identity`
 - Trigger GAS semanal de jugadores (`runWeeklyPlayersSync`) ejecuta:
   - `POST /api/v1/jobs/orchestrate/weekly-players`
+- En daily, antes de `model_recompute`, corre `news_context_extract` para procesar cuerpos de noticias y guardar contexto estructurado por partido.
 - Flujo semanal de jugadores backend:
   - `sync_all_leagues_players` (sin ingesta de venues/referees en esta fase) ->
   - `validate_players_identity_all_leagues` -> `validate_core_entities_identity` -> `validate_sync_coverage_all_leagues` ->
