@@ -1,7 +1,7 @@
-"""Multi-league teams, squads and players sync via API-Football.
+"""Multi-league teams, squads and players sync with canonical source fallback.
 
 Called by the weekly cron jobs to keep teams and player rosters up to date
-for every competition in the catalog that has an API_FOOTBALL external_id.
+for every competition in the catalog with supported external ids.
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.clients.api_football_client import ApiFootballClient
+from app.clients.football_data_client import FootballDataClient
+from app.clients.sportmonks_client import SportmonksClient
 from app.competitions.catalog import supported_competitions
 from app.core.config import get_settings
 from app.core.time import iso_utc
@@ -48,6 +50,17 @@ def _country_code_or_none(country: str | None) -> str | None:
     if len(value) == 2 and value.isalpha():
         return value
     return None
+
+
+def _sportmonks_items(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    node = payload.get(key)
+    if isinstance(node, list):
+        return [item for item in node if isinstance(item, dict)]
+    if isinstance(node, dict):
+        data = node.get("data")
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+    return []
 
 
 async def _resolve_country_code(conn: AsyncConnection, country_value: str | None, cache: dict[str, str | None]) -> str | None:
@@ -318,20 +331,79 @@ async def _record_sync_event(conn: AsyncConnection, severity: str, check_type: s
         log.exception("team_sync: failed to write data_quality_event check_type=%s", check_type)
 
 
+async def _api_football_calls_today(conn: AsyncConnection) -> int:
+    row = await conn.execute(
+        text(
+            """
+            SELECT COUNT(*)::int
+            FROM raw_api_calls
+            WHERE source = 'API_FOOTBALL'
+              AND called_at >= date_trunc('day', now())
+              AND called_at < date_trunc('day', now()) + interval '1 day'
+            """
+        )
+    )
+    return int(row.scalar_one() or 0)
+
+
+async def _api_football_has_budget(conn: AsyncConnection, settings: Any, reserve: int = 0) -> bool:
+    used = await _api_football_calls_today(conn)
+    return used + max(reserve, 0) < int(settings.api_football_daily_budget)
+
+
+async def _record_api_call(
+    conn: AsyncConnection,
+    *,
+    source: str,
+    endpoint: str,
+    request_hash: str,
+    request_payload: dict[str, Any],
+    response_status: int,
+    response_hash: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    try:
+        await conn.execute(
+            text(
+                """
+                INSERT INTO raw_api_calls
+                  (source, endpoint, request_hash, request_payload, response_status, response_hash, latency_ms, payload)
+                VALUES
+                                    (:source, :endpoint, :request_hash, cast(:request_payload as jsonb), :response_status,
+                   :response_hash, null, cast(:payload as jsonb))
+                """
+            ),
+            {
+                                "source": source,
+                "endpoint": endpoint,
+                "request_hash": request_hash,
+                "request_payload": _json(request_payload),
+                "response_status": response_status,
+                "response_hash": response_hash,
+                "payload": _json(payload or {}),
+            },
+        )
+    except Exception:
+        # Quota telemetry must not fail ingestion.
+        log.exception("team_sync: failed to persist raw_api_calls endpoint=%s", endpoint)
+
+
 async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
-    """Upsert teams for every catalog entry with an API_FOOTBALL external_id (canonical schema only)."""
+    """Upsert teams for every catalog entry using source priority (canonical schema only)."""
     settings = get_settings()
-    if not settings.api_football_key:
+    if not settings.api_football_key and not settings.football_data_token and not settings.sportmonks_api_token:
         return {
             "status": "WARN",
             "job_name": "sync_all_leagues_teams",
             "records_processed": 0,
-            "errors": ["API_FOOTBALL_KEY is not configured."],
+            "errors": ["At least one team source credential is required (API_FOOTBALL_KEY, FOOTBALL_DATA_TOKEN or SPORTMONKS_API_TOKEN)."],
             "schema_mode": SCHEMA_UNKNOWN,
             "generated_at": iso_utc(),
         }
 
-    client = ApiFootballClient()
+    api_football_client = ApiFootballClient() if settings.api_football_key else None
+    football_data_client = FootballDataClient() if settings.football_data_token else None
+    sportmonks_client = SportmonksClient() if settings.sportmonks_api_token else None
     total_teams = 0
     errors: list[str] = []
     skipped: list[dict[str, str]] = []
@@ -350,9 +422,11 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         }
 
     for entry in supported_competitions():
-        league_id = entry.source.external_ids.get("API_FOOTBALL")
-        if not league_id:
-            skipped.append({"league": entry.slug, "reason": "MISSING_API_FOOTBALL_EXTERNAL_ID"})
+        league_api_football_id = entry.source.external_ids.get("API_FOOTBALL")
+        league_football_data_code = entry.source.external_ids.get("FOOTBALL_DATA")
+        has_sportmonks_capability = "teams" in (entry.source.capabilities.get("SPORTMONKS") or [])
+        if not league_api_football_id and not league_football_data_code and not has_sportmonks_capability:
+            skipped.append({"league": entry.slug, "reason": "MISSING_SUPPORTED_EXTERNAL_ID"})
             continue
 
         # Derive season year from the entry's start date (e.g. "2026" from "2026-06-01")
@@ -361,26 +435,163 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             skipped.append({"league": entry.slug, "reason": "INVALID_SEASON_YEAR"})
             continue
 
-        try:
-            data = await client.teams(league=int(league_id), season=int(season_year))
-            teams_raw = (data.get("response") or [])
-        except Exception as exc:
-            log.warning("team_sync: API-Football teams failed league=%s season=%s err=%s", league_id, season_year, exc)
-            errors.append(f"{entry.slug}: {exc}")
+        selected_source: str | None = None
+        teams_rows: list[dict[str, Any]] = []
+        source_errors: list[str] = []
+        source_attempts: list[dict[str, str]] = []
+
+        if league_api_football_id and api_football_client:
+            if not await _api_football_has_budget(conn, settings):
+                source_errors.append("API_FOOTBALL_DAILY_BUDGET_EXHAUSTED")
+                source_attempts.append({"source": "API_FOOTBALL", "reason": "DAILY_BUDGET_EXHAUSTED"})
+                await _record_sync_event(
+                    conn,
+                    "WARN",
+                    "API_FOOTBALL_DAILY_BUDGET_EXHAUSTED",
+                    f"API_FOOTBALL daily budget exhausted for {entry.slug}",
+                    {"league": entry.slug, "season_year": season_year},
+                )
+            else:
+                try:
+                    data = await api_football_client.teams(league=int(league_api_football_id), season=int(season_year))
+                    raw_items = (data.get("response") or [])
+                    await _record_api_call(
+                        conn,
+                        source="API_FOOTBALL",
+                        endpoint="teams",
+                        request_hash=f"teams:league={league_api_football_id}:season={season_year}",
+                        request_payload={"league": int(league_api_football_id), "season": int(season_year)},
+                        response_status=200,
+                        response_hash=str(data.get("results") or len(raw_items)),
+                        payload={"league": entry.slug, "results": len(raw_items)},
+                    )
+                    teams_rows = [
+                        {
+                            "source": "API_FOOTBALL",
+                            "external_id": str((item.get("team") or {}).get("id") or ""),
+                            "name": (item.get("team") or {}).get("name"),
+                            "country": (item.get("team") or {}).get("country"),
+                            "national": bool((item.get("team") or {}).get("national", False)),
+                            "venue": item.get("venue") or {},
+                            "team": item.get("team") or {},
+                        }
+                        for item in raw_items
+                        if (item.get("team") or {}).get("id")
+                    ]
+                    if teams_rows:
+                        selected_source = "API_FOOTBALL"
+                        source_attempts.append({"source": "API_FOOTBALL", "reason": "SELECTED"})
+                    else:
+                        source_attempts.append({"source": "API_FOOTBALL", "reason": "EMPTY_RESPONSE"})
+                except Exception as exc:
+                    source_errors.append(f"API_FOOTBALL:{exc}")
+                    source_attempts.append({"source": "API_FOOTBALL", "reason": f"ERROR:{exc}"})
+
+        if not teams_rows and league_football_data_code and football_data_client:
+            try:
+                data = await football_data_client.competition_teams(code=str(league_football_data_code), season=int(season_year))
+                raw_items = data.get("teams") or []
+                await _record_api_call(
+                    conn,
+                    source="FOOTBALL_DATA",
+                    endpoint="competition_teams",
+                    request_hash=f"teams:code={league_football_data_code}:season={season_year}",
+                    request_payload={"code": str(league_football_data_code), "season": int(season_year)},
+                    response_status=200,
+                    response_hash=str(len(raw_items)),
+                    payload={"league": entry.slug, "results": len(raw_items)},
+                )
+                teams_rows = [
+                    {
+                        "source": "FOOTBALL_DATA",
+                        "external_id": str(item.get("id") or ""),
+                        "name": item.get("name") or item.get("shortName") or item.get("tla"),
+                        "country": ((item.get("area") or {}).get("name") or (item.get("area") or {}).get("code")),
+                        "national": False,
+                        "venue": {"name": item.get("venue")},
+                        "team": item,
+                    }
+                    for item in raw_items
+                    if item.get("id") and (item.get("name") or item.get("shortName") or item.get("tla"))
+                ]
+                if teams_rows:
+                    selected_source = "FOOTBALL_DATA"
+                    source_attempts.append({"source": "FOOTBALL_DATA", "reason": "SELECTED"})
+                else:
+                    source_attempts.append({"source": "FOOTBALL_DATA", "reason": "EMPTY_RESPONSE"})
+            except Exception as exc:
+                source_errors.append(f"FOOTBALL_DATA:{exc}")
+                source_attempts.append({"source": "FOOTBALL_DATA", "reason": f"ERROR:{exc}"})
+
+        if not teams_rows and sportmonks_client and has_sportmonks_capability:
+            try:
+                data = await sportmonks_client.fixtures(include="participants", page=1, per_page=100)
+                fixtures = data.get("data") or []
+                parsed_teams: dict[str, dict[str, Any]] = {}
+                for fixture in fixtures:
+                    for participant in _sportmonks_items(fixture, "participants"):
+                        external_id = str(participant.get("id") or "")
+                        team_name = participant.get("name")
+                        if not external_id or not team_name:
+                            continue
+                        parsed_teams.setdefault(
+                            external_id,
+                            {
+                                "source": "SPORTMONKS",
+                                "external_id": external_id,
+                                "name": team_name,
+                                "country": None,
+                                "national": False,
+                                "venue": {"name": participant.get("venue_name")},
+                                "team": participant,
+                            },
+                        )
+
+                teams_rows = list(parsed_teams.values())
+                await _record_api_call(
+                    conn,
+                    source="SPORTMONKS",
+                    endpoint="fixtures",
+                    request_hash=f"teams:entry={entry.slug}:fixtures:participants",
+                    request_payload={"entry": entry.slug, "include": "participants", "page": 1, "per_page": 100},
+                    response_status=200,
+                    response_hash=str(len(teams_rows)),
+                    payload={"league": entry.slug, "fixtures": len(fixtures), "results": len(teams_rows)},
+                )
+                if teams_rows:
+                    selected_source = "SPORTMONKS"
+                    source_attempts.append({"source": "SPORTMONKS", "reason": "SELECTED"})
+                else:
+                    source_attempts.append({"source": "SPORTMONKS", "reason": "EMPTY_RESPONSE"})
+            except Exception as exc:
+                source_errors.append(f"SPORTMONKS:{exc}")
+                source_attempts.append({"source": "SPORTMONKS", "reason": f"ERROR:{exc}"})
+
+        if not teams_rows:
+            msg = "; ".join(source_errors) if source_errors else "NO_SOURCE_WITH_DATA"
+            errors.append(f"{entry.slug}: {msg}")
             league_stats.append(
                 {
                     "league": entry.slug,
                     "status": "ERROR",
                     "teams_processed": 0,
-                    "error": str(exc),
+                    "error": msg,
+                    "source_attempts": source_attempts,
                 }
             )
             await _record_sync_event(
                 conn,
                 "ERROR",
                 "TEAM_SYNC_LEAGUE_ERROR",
-                f"team sync API failed for {entry.slug}",
-                {"league": entry.slug, "league_id": str(league_id), "season_year": season_year, "error": str(exc)},
+                f"team sync failed for {entry.slug}",
+                {
+                    "league": entry.slug,
+                    "api_football_id": str(league_api_football_id or ""),
+                    "football_data_code": str(league_football_data_code or ""),
+                    "season_year": season_year,
+                    "error": msg,
+                    "source_attempts": source_attempts,
+                },
             )
             continue
 
@@ -397,34 +608,34 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         competition_season_id = cs[0]
         league_processed = 0
 
-        for item in teams_raw:
+        for item in teams_rows:
             team_info = item.get("team") or {}
             venue_info = item.get("venue") or {}
-            if not team_info.get("id"):
+            external_id = str(item.get("external_id") or "")
+            if not external_id:
                 continue
 
-            team_slug = _slug(team_info.get("name", ""))
-            external_id = str(team_info["id"])
-
             try:
-                team_name = team_info.get("name", team_slug)
-                team_type = "NATIONAL_TEAM" if bool(team_info.get("national", False)) else "CLUB"
-                country_code = await _resolve_country_code(conn, team_info.get("country"), country_cache)
+                team_name = str(item.get("name") or team_info.get("name") or f"team-{external_id}")
+                team_type = "NATIONAL_TEAM" if bool(item.get("national", False)) else "CLUB"
+                country_code = await _resolve_country_code(conn, item.get("country") or team_info.get("country"), country_cache)
                 team_id = await _resolve_or_create_team(
                     conn,
-                    source="API_FOOTBALL",
+                    source=selected_source or "API_FOOTBALL",
                     source_team_id=external_id,
                     display_name=team_name,
                     team_type=team_type,
                     country_code=country_code,
                     metadata={
-                        "api_football_id": external_id,
-                        "country": team_info.get("country"),
+                        "api_football_id": external_id if (selected_source == "API_FOOTBALL") else None,
+                        "football_data_id": external_id if (selected_source == "FOOTBALL_DATA") else None,
+                        "sportmonks_id": external_id if (selected_source == "SPORTMONKS") else None,
+                        "country": item.get("country") or team_info.get("country"),
                         "founded_year": team_info.get("founded"),
                         "stadium_name": venue_info.get("name"),
                         "stadium_capacity": venue_info.get("capacity"),
-                        "logo_url": team_info.get("logo"),
-                        "ingestion_source": "API_FOOTBALL",
+                        "logo_url": team_info.get("logo") or team_info.get("crest"),
+                        "ingestion_source": selected_source,
                     },
                 )
 
@@ -444,22 +655,24 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                     {
                         "cs_id": competition_season_id,
                         "team_id": team_id,
-                        "metadata": _json({"source": "API_FOOTBALL", "external_id": external_id}),
+                        "metadata": _json({"source": selected_source, "external_id": external_id}),
                     },
                 )
                 total_teams += 1
                 league_processed += 1
             except Exception as exc:
-                log.warning("team_sync: upsert failed slug=%s team=%s err=%s", entry.slug, team_info.get("name"), exc)
-                errors.append(f"{entry.slug}/{team_info.get('name')}: {exc}")
+                log.warning("team_sync: upsert failed slug=%s team=%s err=%s", entry.slug, item.get("name") or team_info.get("name"), exc)
+                errors.append(f"{entry.slug}/{item.get('name') or team_info.get('name')}: {exc}")
 
         league_status = "OK" if league_processed > 0 else "WARN"
         league_stats.append(
             {
                 "league": entry.slug,
                 "status": league_status,
+                "source": selected_source,
                 "teams_processed": league_processed,
-                "teams_received": len(teams_raw),
+                "teams_received": len(teams_rows),
+                "source_attempts": source_attempts,
             }
         )
         await _record_sync_event(
@@ -469,15 +682,27 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             f"team sync completed for {entry.slug}",
             {
                 "league": entry.slug,
+                "source": selected_source,
                 "teams_processed": league_processed,
-                "teams_received": len(teams_raw),
+                "teams_received": len(teams_rows),
                 "status": league_status,
+                "source_attempts": source_attempts,
             },
         )
 
     status = "WARN" if errors else "OK"
     summary = {
-        "eligible_leagues": len([c for c in supported_competitions() if c.source.external_ids.get("API_FOOTBALL")]),
+        "eligible_leagues": len(
+            [
+                c
+                for c in supported_competitions()
+                if (
+                    c.source.external_ids.get("API_FOOTBALL")
+                    or c.source.external_ids.get("FOOTBALL_DATA")
+                    or "teams" in (c.source.capabilities.get("SPORTMONKS") or [])
+                )
+            ]
+        ),
         "processed_leagues": len([s for s in league_stats if s.get("status") == "OK"]),
         "warn_leagues": len([s for s in league_stats if s.get("status") == "WARN"]),
         "error_leagues": len([s for s in league_stats if s.get("status") == "ERROR"]),
@@ -497,18 +722,18 @@ async def sync_teams_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
 
 
 async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
-    """Upsert players and competition rosters for every catalog entry with API_FOOTBALL.
+    """Upsert players and competition rosters for every catalog entry using source priority.
 
     Players API is paginated. We iterate pages until paging.current == paging.total.
     This is rate-limit aware: if no API key is configured the loop is skipped gracefully.
     """
     settings = get_settings()
-    if not settings.api_football_key:
+    if not settings.api_football_key and not settings.football_data_token and not settings.sportmonks_api_token:
         return {
             "status": "WARN",
             "job_name": "sync_all_leagues_players",
             "records_processed": 0,
-            "errors": ["API_FOOTBALL_KEY is not configured."],
+            "errors": ["At least one player source credential is required (API_FOOTBALL_KEY, FOOTBALL_DATA_TOKEN or SPORTMONKS_API_TOKEN)."],
             "schema_mode": SCHEMA_UNKNOWN,
             "generated_at": iso_utc(),
         }
@@ -682,19 +907,19 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         await _upsert_player_external_ref(player_id, source, source_player_id, display_name)
         return player_id
 
-    async def _resolve_team_id_for_api_football(team_external_id: str) -> str | None:
+    async def _resolve_team_id_for_source(team_external_id: str, source: str) -> str | None:
         ref_row = await conn.execute(
             text(
                 """
                 SELECT entity_id::text
                 FROM entity_external_refs
                 WHERE entity_type = 'TEAM'
-                  AND source = 'API_FOOTBALL'
+                  AND source = :source
                   AND source_entity_id = :team_external_id
                 LIMIT 1
                 """
             ),
-            {"team_external_id": team_external_id},
+            {"source": source, "team_external_id": team_external_id},
         )
         team_id = ref_row.scalar_one_or_none()
         if team_id:
@@ -708,10 +933,11 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                 JOIN competition_team_entries cte ON cte.team_id = t.team_id
                 WHERE cte.competition_season_id = cast(:cs_id as uuid)
                   AND cte.metadata->>'external_id' = :team_external_id
+                                    AND coalesce(cte.metadata->>'source', '') = :source
                 LIMIT 1
                 """
             ),
-            {"cs_id": competition_season_id, "team_external_id": team_external_id},
+                        {"cs_id": competition_season_id, "team_external_id": team_external_id, "source": source},
         )
         return legacy_row.scalar_one_or_none()
 
@@ -756,7 +982,7 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             },
         )
 
-    async def _reconcile_removed_rosters(active_pairs: list[dict[str, str]]) -> int:
+    async def _reconcile_removed_rosters(active_pairs: list[dict[str, str]], source: str) -> int:
         if not active_pairs:
             result = await conn.execute(
                 text(
@@ -764,13 +990,17 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                     UPDATE competition_rosters cr
                     SET roster_status = 'CUT',
                         updated_at = now(),
-                        metadata = cr.metadata || '{"deactivated_by":"player_sync","source":"API_FOOTBALL"}'::jsonb
+                        metadata = cr.metadata || cast(:metadata as jsonb)
                     WHERE cr.competition_season_id = cast(:cs_id as uuid)
-                      AND coalesce(cr.metadata->>'source','') = 'API_FOOTBALL'
+                      AND coalesce(cr.metadata->>'source','') = :source
                       AND cr.roster_status in ('ACTIVE', 'CALLED_UP', 'UNKNOWN')
                     """
                 ),
-                {"cs_id": competition_season_id},
+                {
+                    "cs_id": competition_season_id,
+                    "source": source,
+                    "metadata": _json({"deactivated_by": "player_sync", "source": source}),
+                },
             )
             return int(result.rowcount or 0)
 
@@ -786,9 +1016,9 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                 UPDATE competition_rosters cr
                 SET roster_status = 'CUT',
                     updated_at = now(),
-                    metadata = cr.metadata || '{"deactivated_by":"player_sync","source":"API_FOOTBALL"}'::jsonb
+                                        metadata = cr.metadata || cast(:metadata as jsonb)
                 WHERE cr.competition_season_id = cast(:cs_id as uuid)
-                  AND coalesce(cr.metadata->>'source','') = 'API_FOOTBALL'
+                                    AND coalesce(cr.metadata->>'source','') = :source
                   AND cr.roster_status in ('ACTIVE', 'CALLED_UP', 'UNKNOWN')
                   AND NOT EXISTS (
                     SELECT 1
@@ -798,11 +1028,18 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
                   )
                 """
             ),
-            {"cs_id": competition_season_id, "active_pairs": _json(active_pairs)},
+            {
+                "cs_id": competition_season_id,
+                "source": source,
+                "active_pairs": _json(active_pairs),
+                "metadata": _json({"deactivated_by": "player_sync", "source": source}),
+            },
         )
         return int(result.rowcount or 0)
 
-    client = ApiFootballClient()
+    api_football_client = ApiFootballClient() if settings.api_football_key else None
+    football_data_client = FootballDataClient() if settings.football_data_token else None
+    sportmonks_client = SportmonksClient() if settings.sportmonks_api_token else None
     total_players = 0
     errors: list[str] = []
     skipped: list[dict[str, str]] = []
@@ -822,10 +1059,16 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
 
     for entry in supported_competitions():
         league_id = entry.source.external_ids.get("API_FOOTBALL")
-        if not league_id:
-            skipped.append({"league": entry.slug, "reason": "MISSING_API_FOOTBALL_EXTERNAL_ID"})
+        football_data_code = entry.source.external_ids.get("FOOTBALL_DATA")
+        has_sportmonks_players_capability = "players" in (entry.source.capabilities.get("SPORTMONKS") or [])
+        if not league_id and not football_data_code and not has_sportmonks_players_capability:
+            skipped.append({"league": entry.slug, "reason": "MISSING_SUPPORTED_EXTERNAL_ID"})
             continue
-        if "players" not in (entry.source.capabilities.get("API_FOOTBALL") or []):
+        if (
+            "players" not in (entry.source.capabilities.get("API_FOOTBALL") or [])
+            and "players" not in (entry.source.capabilities.get("FOOTBALL_DATA") or [])
+            and "players" not in (entry.source.capabilities.get("SPORTMONKS") or [])
+        ):
             skipped.append({"league": entry.slug, "reason": "PLAYERS_CAPABILITY_NOT_ENABLED"})
             continue
 
@@ -848,114 +1091,354 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
         league_errors = 0
         pages_processed = 0
         active_pairs: list[dict[str, str]] = []
+        selected_source: str | None = None
+        source_attempts: list[dict[str, str]] = []
 
-        page = 1
-        while True:
-            try:
-                data = await client.players(league=int(league_id), season=int(season_year), page=page)
-            except Exception as exc:
-                log.warning("player_sync: API failed league=%s page=%s err=%s", league_id, page, exc)
-                errors.append(f"{entry.slug} page={page}: {exc}")
-                league_errors += 1
-                await _record_sync_event(
-                    conn,
-                    "ERROR",
-                    "PLAYER_SYNC_LEAGUE_ERROR",
-                    f"player sync API failed for {entry.slug}",
-                    {"league": entry.slug, "league_id": str(league_id), "season_year": season_year, "page": page, "error": str(exc)},
-                )
-                break
-
-            items = data.get("response") or []
-            paging = data.get("paging") or {}
-            pages_processed += 1
-
-            for item in items:
-                player_info = item.get("player") or {}
-                statistics = item.get("statistics") or [{}]
-                stat = statistics[0] if statistics else {}
-                team_info = (stat.get("team") or {})
-
-                if not player_info.get("id"):
-                    continue
-
-                external_id = str(player_info["id"])
+        if league_id and api_football_client and "players" in (entry.source.capabilities.get("API_FOOTBALL") or []):
+            page = 1
+            while True:
+                if not await _api_football_has_budget(conn, settings):
+                    skipped.append({"league": entry.slug, "reason": "API_FOOTBALL_DAILY_BUDGET_EXHAUSTED"})
+                    source_attempts.append({"source": "API_FOOTBALL", "reason": "DAILY_BUDGET_EXHAUSTED"})
+                    await _record_sync_event(
+                        conn,
+                        "WARN",
+                        "API_FOOTBALL_DAILY_BUDGET_EXHAUSTED",
+                        f"API_FOOTBALL daily budget exhausted for {entry.slug}",
+                        {"league": entry.slug, "season_year": season_year},
+                    )
+                    break
 
                 try:
-                    player_name = (
-                        player_info.get("name")
-                        or f"{player_info.get('firstname','')} {player_info.get('lastname','')}".strip()
-                        or f"player-{external_id}"
-                    )
-                    player_id = await _resolve_or_create_player(
+                    data = await api_football_client.players(league=int(league_id), season=int(season_year), page=page)
+                    await _record_api_call(
+                        conn,
                         source="API_FOOTBALL",
-                        source_player_id=external_id,
-                        display_name=player_name,
-                        birth_date=player_info.get("birth", {}).get("date"),
-                        nationality_country_code=await _resolve_country_code(conn, player_info.get("nationality"), country_cache),
-                        metadata={
-                            "api_football_id": external_id,
-                            "position": player_info.get("position"),
-                            "number": player_info.get("number"),
-                            "photo_url": player_info.get("photo"),
-                            "nationality": player_info.get("nationality"),
-                            "ingestion_source": "API_FOOTBALL",
-                        },
+                        endpoint="players",
+                        request_hash=f"players:league={league_id}:season={season_year}:page={page}",
+                        request_payload={"league": int(league_id), "season": int(season_year), "page": page},
+                        response_status=200,
+                        response_hash=str((data.get("paging") or {}).get("current") or page),
+                        payload={"league": entry.slug, "page": page, "results": len(data.get("response") or [])},
                     )
+                except Exception as exc:
+                    log.warning("player_sync: API failed league=%s page=%s err=%s", league_id, page, exc)
+                    errors.append(f"{entry.slug} page={page}: {exc}")
+                    league_errors += 1
+                    await _record_sync_event(
+                        conn,
+                        "ERROR",
+                        "PLAYER_SYNC_LEAGUE_ERROR",
+                        f"player sync API failed for {entry.slug}",
+                        {"league": entry.slug, "league_id": str(league_id), "season_year": season_year, "page": page, "error": str(exc)},
+                    )
+                    break
 
-                    # Roster/membership links.
-                    if team_info.get("id"):
-                        team_ext = str(team_info["id"])
-                        team_id = await _resolve_team_id_for_api_football(team_ext)
-                        if team_id:
-                            await conn.execute(
-                                text(
-                                    """
-                                    INSERT INTO competition_rosters
-                                      (competition_season_id, team_id, player_id, shirt_number,
-                                       position, roster_status, metadata)
-                                    VALUES
-                                      (cast(:cs_id as uuid), cast(:team_id as uuid), cast(:player_id as uuid),
-                                       :number, :position, 'ACTIVE', cast(:metadata as jsonb))
-                                    ON CONFLICT (competition_season_id, team_id, player_id) DO UPDATE SET
-                                      position = COALESCE(excluded.position, competition_rosters.position),
-                                      shirt_number = COALESCE(excluded.shirt_number, competition_rosters.shirt_number),
-                                      roster_status = 'ACTIVE',
-                                      metadata = competition_rosters.metadata || excluded.metadata,
-                                      updated_at = now()
-                                    """
-                                ),
-                                {
-                                    "cs_id": competition_season_id,
-                                    "team_id": team_id,
-                                    "player_id": player_id,
-                                    "position": player_info.get("position"),
-                                    "number": player_info.get("number"),
-                                    "metadata": _json(
-                                        {
-                                            "source": "API_FOOTBALL",
-                                            "team_external_id": team_ext,
-                                            "league": entry.slug,
-                                        }
+                items = data.get("response") or []
+                paging = data.get("paging") or {}
+                pages_processed += 1
+                selected_source = "API_FOOTBALL"
+                if pages_processed == 1:
+                    source_attempts.append({"source": "API_FOOTBALL", "reason": "SELECTED"})
+
+                for item in items:
+                    player_info = item.get("player") or {}
+                    statistics = item.get("statistics") or [{}]
+                    stat = statistics[0] if statistics else {}
+                    team_info = (stat.get("team") or {})
+
+                    if not player_info.get("id"):
+                        continue
+
+                    external_id = str(player_info["id"])
+
+                    try:
+                        player_name = (
+                            player_info.get("name")
+                            or f"{player_info.get('firstname','')} {player_info.get('lastname','')}".strip()
+                            or f"player-{external_id}"
+                        )
+                        player_id = await _resolve_or_create_player(
+                            source="API_FOOTBALL",
+                            source_player_id=external_id,
+                            display_name=player_name,
+                            birth_date=player_info.get("birth", {}).get("date"),
+                            nationality_country_code=await _resolve_country_code(conn, player_info.get("nationality"), country_cache),
+                            metadata={
+                                "api_football_id": external_id,
+                                "position": player_info.get("position"),
+                                "number": player_info.get("number"),
+                                "photo_url": player_info.get("photo"),
+                                "nationality": player_info.get("nationality"),
+                                "ingestion_source": "API_FOOTBALL",
+                            },
+                        )
+
+                        if team_info.get("id"):
+                            team_ext = str(team_info["id"])
+                            team_id = await _resolve_team_id_for_source(team_ext, "API_FOOTBALL")
+                            if team_id:
+                                await conn.execute(
+                                    text(
+                                        """
+                                        INSERT INTO competition_rosters
+                                          (competition_season_id, team_id, player_id, shirt_number,
+                                           position, roster_status, metadata)
+                                        VALUES
+                                          (cast(:cs_id as uuid), cast(:team_id as uuid), cast(:player_id as uuid),
+                                           :number, :position, 'ACTIVE', cast(:metadata as jsonb))
+                                        ON CONFLICT (competition_season_id, team_id, player_id) DO UPDATE SET
+                                          position = COALESCE(excluded.position, competition_rosters.position),
+                                          shirt_number = COALESCE(excluded.shirt_number, competition_rosters.shirt_number),
+                                          roster_status = 'ACTIVE',
+                                          metadata = competition_rosters.metadata || excluded.metadata,
+                                          updated_at = now()
+                                        """
                                     ),
+                                    {
+                                        "cs_id": competition_season_id,
+                                        "team_id": team_id,
+                                        "player_id": player_id,
+                                        "position": player_info.get("position"),
+                                        "number": player_info.get("number"),
+                                        "metadata": _json(
+                                            {
+                                                "source": "API_FOOTBALL",
+                                                "team_external_id": team_ext,
+                                                "league": entry.slug,
+                                            }
+                                        ),
+                                    },
+                                )
+
+                                await _upsert_team_membership(player_id, team_id, "API_FOOTBALL")
+                                active_pairs.append({"team_id": team_id, "player_id": player_id})
+
+                        total_players += 1
+                        league_processed += 1
+                    except Exception as exc:
+                        log.warning("player_sync: upsert failed slug=%s player=%s err=%s", entry.slug, player_info.get("name"), exc)
+                        errors.append(f"{entry.slug}/{player_info.get('name')}: {exc}")
+                        league_errors += 1
+
+                if not items or paging.get("current") >= paging.get("total", 1):
+                    break
+                page += 1
+
+        if selected_source is None and football_data_code and football_data_client:
+            try:
+                data = await football_data_client.competition_teams(code=str(football_data_code), season=int(season_year))
+                teams = data.get("teams") or []
+                await _record_api_call(
+                    conn,
+                    source="FOOTBALL_DATA",
+                    endpoint="competition_teams",
+                    request_hash=f"players:code={football_data_code}:season={season_year}",
+                    request_payload={"code": str(football_data_code), "season": int(season_year)},
+                    response_status=200,
+                    response_hash=str(len(teams)),
+                    payload={"league": entry.slug, "teams": len(teams)},
+                )
+                candidate_active_pairs: list[dict[str, str]] = []
+                football_data_players_processed = 0
+                for team in teams:
+                    team_ext = str(team.get("id") or "")
+                    if not team_ext:
+                        continue
+                    squad = team.get("squad") or []
+                    for player_info in squad:
+                        external_id = str(player_info.get("id") or "")
+                        if not external_id:
+                            continue
+                        try:
+                            player_name = player_info.get("name") or f"player-{external_id}"
+                            player_id = await _resolve_or_create_player(
+                                source="FOOTBALL_DATA",
+                                source_player_id=external_id,
+                                display_name=player_name,
+                                birth_date=player_info.get("dateOfBirth"),
+                                nationality_country_code=await _resolve_country_code(conn, player_info.get("nationality"), country_cache),
+                                metadata={
+                                    "football_data_id": external_id,
+                                    "position": player_info.get("position"),
+                                    "shirt_number": player_info.get("shirtNumber"),
+                                    "nationality": player_info.get("nationality"),
+                                    "ingestion_source": "FOOTBALL_DATA",
+                                },
+                            )
+                            team_id = await _resolve_team_id_for_source(team_ext, "FOOTBALL_DATA")
+                            if team_id:
+                                await conn.execute(
+                                    text(
+                                        """
+                                        INSERT INTO competition_rosters
+                                          (competition_season_id, team_id, player_id, shirt_number,
+                                           position, roster_status, metadata)
+                                        VALUES
+                                          (cast(:cs_id as uuid), cast(:team_id as uuid), cast(:player_id as uuid),
+                                           :number, :position, 'ACTIVE', cast(:metadata as jsonb))
+                                        ON CONFLICT (competition_season_id, team_id, player_id) DO UPDATE SET
+                                          position = COALESCE(excluded.position, competition_rosters.position),
+                                          shirt_number = COALESCE(excluded.shirt_number, competition_rosters.shirt_number),
+                                          roster_status = 'ACTIVE',
+                                          metadata = competition_rosters.metadata || excluded.metadata,
+                                          updated_at = now()
+                                        """
+                                    ),
+                                    {
+                                        "cs_id": competition_season_id,
+                                        "team_id": team_id,
+                                        "player_id": player_id,
+                                        "position": player_info.get("position"),
+                                        "number": player_info.get("shirtNumber"),
+                                        "metadata": _json(
+                                            {
+                                                "source": "FOOTBALL_DATA",
+                                                "team_external_id": team_ext,
+                                                "league": entry.slug,
+                                            }
+                                        ),
+                                    },
+                                )
+                                await _upsert_team_membership(player_id, team_id, "FOOTBALL_DATA")
+                                candidate_active_pairs.append({"team_id": team_id, "player_id": player_id})
+                            total_players += 1
+                            league_processed += 1
+                            football_data_players_processed += 1
+                        except Exception as exc:
+                            log.warning("player_sync: football-data upsert failed slug=%s player=%s err=%s", entry.slug, player_info.get("name"), exc)
+                            errors.append(f"{entry.slug}/{player_info.get('name')}: {exc}")
+                            league_errors += 1
+
+                if football_data_players_processed > 0:
+                    selected_source = "FOOTBALL_DATA"
+                    pages_processed = 1
+                    active_pairs.extend(candidate_active_pairs)
+                    source_attempts.append({"source": "FOOTBALL_DATA", "reason": "SELECTED"})
+                else:
+                    source_attempts.append({"source": "FOOTBALL_DATA", "reason": "EMPTY_RESPONSE"})
+            except Exception as exc:
+                errors.append(f"{entry.slug} football-data: {exc}")
+                league_errors += 1
+                source_attempts.append({"source": "FOOTBALL_DATA", "reason": f"ERROR:{exc}"})
+
+        if selected_source is None and sportmonks_client and has_sportmonks_players_capability:
+            try:
+                data = await sportmonks_client.fixtures(include="participants;lineups;lineups.player", page=1, per_page=100)
+                fixtures = data.get("data") or []
+                candidate_active_pairs: list[dict[str, str]] = []
+                sportmonks_players_processed = 0
+
+                for fixture in fixtures:
+                    participants = {
+                        str(p.get("id")): p
+                        for p in _sportmonks_items(fixture, "participants")
+                        if p.get("id")
+                    }
+
+                    for lineup in _sportmonks_items(fixture, "lineups"):
+                        player_node = lineup.get("player") if isinstance(lineup.get("player"), dict) else {}
+                        external_id = str(player_node.get("id") or lineup.get("player_id") or "")
+                        if not external_id:
+                            continue
+
+                        team_ext = str(lineup.get("participant_id") or lineup.get("team_id") or "")
+                        participant = participants.get(team_ext, {})
+                        player_name = player_node.get("name") or lineup.get("player_name") or f"player-{external_id}"
+
+                        try:
+                            player_id = await _resolve_or_create_player(
+                                source="SPORTMONKS",
+                                source_player_id=external_id,
+                                display_name=player_name,
+                                birth_date=player_node.get("date_of_birth"),
+                                nationality_country_code=await _resolve_country_code(conn, player_node.get("nationality"), country_cache),
+                                metadata={
+                                    "sportmonks_id": external_id,
+                                    "position": player_node.get("position") or lineup.get("position"),
+                                    "shirt_number": player_node.get("number") or lineup.get("jersey_number"),
+                                    "nationality": player_node.get("nationality"),
+                                    "ingestion_source": "SPORTMONKS",
                                 },
                             )
 
-                            await _upsert_team_membership(player_id, team_id, "API_FOOTBALL")
-                            active_pairs.append({"team_id": team_id, "player_id": player_id})
+                            if team_ext:
+                                team_id = await _resolve_team_id_for_source(team_ext, "SPORTMONKS")
+                                if team_id:
+                                    await conn.execute(
+                                        text(
+                                            """
+                                            INSERT INTO competition_rosters
+                                              (competition_season_id, team_id, player_id, shirt_number,
+                                               position, roster_status, metadata)
+                                            VALUES
+                                              (cast(:cs_id as uuid), cast(:team_id as uuid), cast(:player_id as uuid),
+                                               :number, :position, 'ACTIVE', cast(:metadata as jsonb))
+                                            ON CONFLICT (competition_season_id, team_id, player_id) DO UPDATE SET
+                                              position = COALESCE(excluded.position, competition_rosters.position),
+                                              shirt_number = COALESCE(excluded.shirt_number, competition_rosters.shirt_number),
+                                              roster_status = 'ACTIVE',
+                                              metadata = competition_rosters.metadata || excluded.metadata,
+                                              updated_at = now()
+                                            """
+                                        ),
+                                        {
+                                            "cs_id": competition_season_id,
+                                            "team_id": team_id,
+                                            "player_id": player_id,
+                                            "position": player_node.get("position") or lineup.get("position"),
+                                            "number": player_node.get("number") or lineup.get("jersey_number"),
+                                            "metadata": _json(
+                                                {
+                                                    "source": "SPORTMONKS",
+                                                    "team_external_id": team_ext,
+                                                    "team_name": participant.get("name"),
+                                                    "league": entry.slug,
+                                                }
+                                            ),
+                                        },
+                                    )
+                                    await _upsert_team_membership(player_id, team_id, "SPORTMONKS")
+                                        candidate_active_pairs.append({"team_id": team_id, "player_id": player_id})
 
-                    total_players += 1
-                    league_processed += 1
-                except Exception as exc:
-                    log.warning("player_sync: upsert failed slug=%s player=%s err=%s", entry.slug, player_info.get("name"), exc)
-                    errors.append(f"{entry.slug}/{player_info.get('name')}: {exc}")
-                    league_errors += 1
+                            total_players += 1
+                            league_processed += 1
+                                    sportmonks_players_processed += 1
+                        except Exception as exc:
+                            log.warning("player_sync: sportmonks upsert failed slug=%s player=%s err=%s", entry.slug, player_name, exc)
+                            errors.append(f"{entry.slug}/{player_name}: {exc}")
+                            league_errors += 1
 
-            if not items or paging.get("current") >= paging.get("total", 1):
-                break
-            page += 1
+                await _record_api_call(
+                    conn,
+                    source="SPORTMONKS",
+                    endpoint="fixtures",
+                    request_hash=f"players:entry={entry.slug}:fixtures:lineups",
+                    request_payload={"entry": entry.slug, "include": "participants;lineups;lineups.player", "page": 1, "per_page": 100},
+                    response_status=200,
+                    response_hash=str(len(fixtures)),
+                    payload={"league": entry.slug, "fixtures": len(fixtures), "players_processed": league_processed},
+                )
 
-        deactivated_rosters = await _reconcile_removed_rosters(active_pairs)
+                if sportmonks_players_processed > 0:
+                    selected_source = "SPORTMONKS"
+                    pages_processed = 1
+                    active_pairs.extend(candidate_active_pairs)
+                    source_attempts.append({"source": "SPORTMONKS", "reason": "SELECTED"})
+                else:
+                    source_attempts.append({"source": "SPORTMONKS", "reason": "EMPTY_RESPONSE"})
+            except Exception as exc:
+                errors.append(f"{entry.slug} sportmonks: {exc}")
+                league_errors += 1
+                source_attempts.append({"source": "SPORTMONKS", "reason": f"ERROR:{exc}"})
+
+        if selected_source is None:
+            skipped.append({"league": entry.slug, "reason": "NO_SOURCE_WITH_PLAYER_DATA"})
+            source_attempts.append({"source": "ALL", "reason": "NO_SOURCE_WITH_PLAYER_DATA"})
+
+        deactivated_rosters = 0
+        if selected_source is not None:
+            deactivated_rosters = await _reconcile_removed_rosters(active_pairs, selected_source)
 
         if league_errors > 0:
             league_status = "WARN"
@@ -968,10 +1451,12 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             {
                 "league": entry.slug,
                 "status": league_status,
+                "source": selected_source,
                 "players_processed": league_processed,
                 "pages_processed": pages_processed,
                 "errors": league_errors,
                 "rosters_deactivated": deactivated_rosters,
+                "source_attempts": source_attempts,
             }
         )
         await _record_sync_event(
@@ -981,11 +1466,13 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             f"player sync completed for {entry.slug}",
             {
                 "league": entry.slug,
+                "source": selected_source,
                 "players_processed": league_processed,
                 "pages_processed": pages_processed,
                 "errors": league_errors,
                 "rosters_deactivated": deactivated_rosters,
                 "status": league_status,
+                "source_attempts": source_attempts,
             },
         )
 
@@ -995,8 +1482,9 @@ async def sync_players_for_all_leagues(conn: AsyncConnection) -> dict[str, Any]:
             [
                 c
                 for c in supported_competitions()
-                if c.source.external_ids.get("API_FOOTBALL")
-                and "players" in (c.source.capabilities.get("API_FOOTBALL") or [])
+                if (c.source.external_ids.get("API_FOOTBALL") and "players" in (c.source.capabilities.get("API_FOOTBALL") or []))
+                or (c.source.external_ids.get("FOOTBALL_DATA") and "players" in (c.source.capabilities.get("FOOTBALL_DATA") or []))
+                or ("players" in (c.source.capabilities.get("SPORTMONKS") or []))
             ]
         ),
         "processed_leagues": len([s for s in league_stats if s.get("status") == "OK"]),
@@ -1042,9 +1530,12 @@ async def validate_sync_coverage_for_all_leagues(conn: AsyncConnection, min_play
     league_stats: list[dict[str, Any]] = []
 
     for entry in supported_competitions():
-        league_id = entry.source.external_ids.get("API_FOOTBALL")
-        if not league_id:
-            skipped.append({"league": entry.slug, "reason": "MISSING_API_FOOTBALL_EXTERNAL_ID"})
+        has_team_source = any(
+            "teams" in (entry.source.capabilities.get(source) or [])
+            for source in [entry.source.primary, *(entry.source.secondary or [])]
+        )
+        if not has_team_source:
+            skipped.append({"league": entry.slug, "reason": "NO_TEAMS_CAPABILITY"})
             continue
 
         cs_row = await conn.execute(

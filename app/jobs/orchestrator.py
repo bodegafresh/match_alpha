@@ -92,6 +92,15 @@ class JobOrchestrator:
         ]
         return await self._run_plan("weekly", plan, context)
 
+    async def weekly_players(self) -> dict[str, Any]:
+        # Weekly players/roster reconciliation in a dedicated window.
+        context = await self._build_context()
+        plan = [
+            OrchestratedJob("sync_all_leagues_players"),
+            OrchestratedJob("validate_sync_coverage_all_leagues"),
+        ]
+        return await self._run_plan("weekly_players", plan, context)
+
     async def should_run_job(self, job_name: str, window: str) -> bool:
         # Uses the generated column idempotency_key (migration 010) + index for fast lookup.
         row = await self.conn.execute(

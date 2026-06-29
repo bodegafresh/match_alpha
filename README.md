@@ -55,6 +55,11 @@ curl -X POST "$API_URL/api/v1/jobs/orchestrate/weekly" \
   -H "Content-Type: application/json" \
   -d '{"source":"manual_ops"}'
 
+curl -X POST "$API_URL/api/v1/jobs/orchestrate/weekly-players" \
+  -H "Authorization: Bearer $API_INTERNAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"manual_ops_players"}'
+
 curl -X POST "$API_URL/api/v1/jobs/telegram_daily_summary/run" \
   -H "Authorization: Bearer $API_INTERNAL_KEY" \
   -H "Content-Type: application/json" \
@@ -67,10 +72,28 @@ Telegram:
 
 ## Operacion Semanal (Canonical)
 
+Prioridad de fuentes para sync canonical:
+- Equipos: API_FOOTBALL primero; luego FOOTBALL_DATA; luego SPORTMONKS (participants desde fixtures).
+- Jugadores: API_FOOTBALL primero; luego FOOTBALL_DATA (squad); luego SPORTMONKS (lineups desde fixtures).
+- Resolucion de identidad: `entity_external_refs` + aliases + normalized name (sin modelo legacy).
+- Seguridad de reconciliacion: rosters solo se desactivan cuando hubo una fuente seleccionada con datos para esa liga.
+- Trazabilidad: `league_stats` incluye `source_attempts` (fuente/razon) para diagnostico de fallback.
+
+Validacion de cobertura (`validate_sync_coverage_all_leagues`):
+- Ya no depende solo de `external_ids.API_FOOTBALL`.
+- Evalua toda liga con capacidad `teams` en alguna fuente declarada del catalogo.
+
 - Trigger GAS semanal existente (`runWeeklyTeamsSync`) ejecuta una sola llamada al servicio:
   - `POST /api/v1/jobs/orchestrate/weekly`
 - Flujo semanal backend:
   - `sync_all_leagues_teams`
+- Trigger GAS semanal de jugadores (`runWeeklyPlayersSync`) ejecuta:
+  - `POST /api/v1/jobs/orchestrate/weekly-players`
+- Flujo semanal de jugadores backend:
+  - `sync_all_leagues_players` -> `validate_sync_coverage_all_leagues`
+
+Diagnostico canonical (duplicados/ambiguedades):
+- `supabase/diagnostics/diag_canonical_duplicates_and_resolution.sql`
 
 Recuperacion manual rapida (si falla una corrida semanal):
 

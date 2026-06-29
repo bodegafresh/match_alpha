@@ -147,6 +147,17 @@ function runWeeklyTeamsSync() {
 }
 
 /**
+ * runWeeklyPlayersSync — corre lunes a las 2 AM UTC.
+ * Sincroniza jugadores y reconcilia rosters en un cron separado del de equipos.
+ */
+function runWeeklyPlayersSync() {
+  return logBackendCronResult_(
+    'runWeeklyPlayersSync',
+    backendFetch_('/api/v1/jobs/orchestrate/weekly-players', { method: 'post', payload: { source: 'gas_weekly_players' } })
+  );
+}
+
+/**
  * runMorningTelegramSummary — trigger diario a las 8:00 Chile.
  * Envia a Telegram un resumen de la corrida daily previa, priorizando EV+.
  */
@@ -240,6 +251,7 @@ function runNewsSyncJob() {
  *   - Daily:      1 hora (10 AM UTC = 6 AM Chile, con guard interno de hora+idempotencia)
  *   - Live:       5 min  (actualización frecuente durante partidos WC2026)
  *   - Weekly orchestration: domingo 2 AM UTC (teams only)
+ *   - Weekly players orchestration: lunes 2 AM UTC (players + rosters)
  */
 function installMatchAlphaTriggers() {
   removeMatchAlphaTriggers();
@@ -278,6 +290,13 @@ function installMatchAlphaTriggers() {
     .inTimezone('UTC')
     .create();
 
+  var weeklyPlayers = ScriptApp.newTrigger('runWeeklyPlayersSync')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(2)
+    .inTimezone('UTC')
+    .create();
+
   var morningSummary = ScriptApp.newTrigger('runMorningTelegramSummary')
     .timeBased()
     .everyHours(1)
@@ -289,9 +308,10 @@ function installMatchAlphaTriggers() {
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'DAILY', daily.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'LIVE', live.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'TEAMS_SYNC', weekly.getUniqueId());
+  props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'PLAYERS_SYNC', weeklyPlayers.getUniqueId());
   props.setProperty(MATCH_ALPHA_CRON_PROPS.TRIGGER_PREFIX + 'MORNING_SUMMARY', morningSummary.getUniqueId());
 
-  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM(orchestrated) morning_summary=1h@12UTC');
+  Logger.log('Triggers instalados: keepalive=10min news=9AM-UTC daily=1h live=5min teams=domingo-2AM players=lunes-2AM morning_summary=1h@12UTC');
   return {
     ok: true,
     keepalive_trigger_id: keepalive.getUniqueId(),
@@ -299,6 +319,7 @@ function installMatchAlphaTriggers() {
     daily_trigger_id: daily.getUniqueId(),
     live_trigger_id: live.getUniqueId(),
     teams_sync_trigger_id: weekly.getUniqueId(),
+    players_sync_trigger_id: weeklyPlayers.getUniqueId(),
     morning_summary_trigger_id: morningSummary.getUniqueId()
   };
 }
@@ -310,6 +331,7 @@ function removeMatchAlphaTriggers() {
     runDailyBackendOrchestration: true,
     runLiveBackendOrchestration: true,
     runWeeklyTeamsSync: true,
+    runWeeklyPlayersSync: true,
     runMorningTelegramSummary: true,
     checkBackendLatestStatus: true,
     checkBackendHealth: true
