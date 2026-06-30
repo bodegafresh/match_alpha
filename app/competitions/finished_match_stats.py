@@ -73,7 +73,8 @@ async def sync_finished_match_stats(conn: AsyncConnection, payload: dict[str, An
     settings = get_settings()
 
     days_back = int(payload.get("days_back", 1) or 1)
-    target_date = (utc_now().date() - timedelta(days=days_back)).isoformat()
+    target_date = utc_now().date() - timedelta(days=days_back)
+    target_date_iso = target_date.isoformat()
 
     matches_result = await conn.execute(
         text(
@@ -101,8 +102,8 @@ async def sync_finished_match_stats(conn: AsyncConnection, payload: dict[str, An
     if sportmonks_client:
         try:
             sportmonks_payload = await sportmonks_client.fixtures(
-                date_from=target_date,
-                date_to=target_date,
+                date_from=target_date_iso,
+                date_to=target_date_iso,
                 include="participants;lineups;lineups.player;statistics;events",
                 page=1,
                 per_page=100,
@@ -198,7 +199,7 @@ async def sync_finished_match_stats(conn: AsyncConnection, payload: dict[str, An
                             "finished_stats": {
                                 "last_synced_at": iso_utc(),
                                 "source": used_source,
-                                "target_date": target_date,
+                                    "target_date": target_date_iso,
                             }
                         }
                     ),
@@ -210,7 +211,7 @@ async def sync_finished_match_stats(conn: AsyncConnection, payload: dict[str, An
         "status": status,
         "job_name": "finished_match_stats_refresh",
         "records_processed": processed,
-        "target_date": target_date,
+        "target_date": target_date_iso,
         "matches_finished": len(matches),
         "matches_enriched": processed,
         "source_usage": source_usage,
