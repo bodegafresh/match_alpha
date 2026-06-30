@@ -1,0 +1,22 @@
+tests/test_qualification/test_slot_resolver.py
+  s_26a64b4a3b48e0::t_a4da43328e9ca4 3-4,69-113
+app/services/qualification/slot_resolver.py
+  s_26a64b4a3b48e0::t_6b54ecc80581a0 100-104,713,764
+  s_26a64b4a3b48e0::t_fd2ed413a4d021 685-712,719-720,726
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "5a7f9f91c60024935a314cc049d2f46dbb7c693d",
+  "prompts": {},
+  "sessions": {
+    "s_26a64b4a3b48e0": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "108db8a7-ebcd-4a3b-9973-0c1f8c2fff7b",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
