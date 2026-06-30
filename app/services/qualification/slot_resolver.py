@@ -18,6 +18,7 @@ When a slot resolves:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import text
@@ -52,6 +53,7 @@ class TournamentSlotResolver:
         group_standings = await self._get_group_standings(competition_season_id)
         best_thirds = await self._get_ranked_best_thirds(competition_season_id)
         knockout_results = await self._get_knockout_results(competition_season_id)
+        slot_source_match_map = await self._build_slot_source_match_map(competition_season_id, slots)
 
         # Build assignment matrix mapping for best-third slots
         qualifying_groups = [
@@ -81,6 +83,22 @@ class TournamentSlotResolver:
         pending_count = 0
 
         for slot in slots:
+            if slot.get("slot_type") in {"WINNER", "LOSER"}:
+                expected_source_match_id = slot_source_match_map.get(slot.get("slot_code") or "")
+                if expected_source_match_id and expected_source_match_id != slot.get("source_match_id"):
+                    log.info(
+                        "slot %s: correcting source_match_id %s -> %s",
+                        slot.get("slot_code"),
+                        slot.get("source_match_id"),
+                        expected_source_match_id,
+                    )
+                    await self._update_slot_source_match_id(
+                        competition_season_id,
+                        slot["tournament_slot_id"],
+                        expected_source_match_id,
+                    )
+                    slot["source_match_id"] = expected_source_match_id
+
             # For already-resolved BEST_THIRD slots:
             # When official matrix mapping is available, keep only slots already
             # aligned with that mapping and re-resolve stale/wrong assignments.
@@ -502,6 +520,30 @@ class TournamentSlotResolver:
             },
         )
 
+    async def _update_slot_source_match_id(
+        self,
+        competition_season_id: str,
+        tournament_slot_id: str,
+        source_match_id: str,
+    ) -> None:
+        await self.conn.execute(
+            text(
+                """
+                UPDATE tournament_slots
+                SET source_match_id = cast(:source_match_id as uuid),
+                    updated_at = :now
+                WHERE tournament_slot_id = cast(:slot_id as uuid)
+                  AND competition_season_id = cast(:season_id as uuid)
+                """
+            ),
+            {
+                "source_match_id": source_match_id,
+                "slot_id": tournament_slot_id,
+                "season_id": competition_season_id,
+                "now": utc_now(),
+            },
+        )
+
     # ── DB reads ──────────────────────────────────────────────────────────────
 
     async def _get_slots(self, competition_season_id: str) -> list[dict]:
@@ -629,3 +671,81 @@ class TournamentSlotResolver:
                 winner = loser = None
             results[r.match_id] = {"winner_team_id": winner, "loser_team_id": loser}
         return results
+
+    async def _build_slot_source_match_map(self, competition_season_id: str, slots: list[dict]) -> dict[str, str]:
+        """
+        Derive source match for WINNER/LOSER slots from slot_code and current stage match numbering.
+        This heals stale mappings in tournament_slots.source_match_id when fixture ordering changes.
+        """
+        stage_by_slot_code: dict[str, tuple[str, int]] = {}
+        for slot in slots:
+            if slot.get("slot_type") not in {"WINNER", "LOSER"}:
+                continue
+            slot_code = str(slot.get("slot_code") or "")
+            parsed = self._slot_stage_and_rank(slot_code)
+            if parsed:
+                stage_by_slot_code[slot_code] = parsed
+
+        if not stage_by_slot_code:
+            return {}
+
+        result = await self.conn.execute(
+            text(
+                """
+                SELECT
+                  m.match_id::text AS match_id,
+                  cs.stage_code,
+                  m.match_number,
+                  row_number() OVER (
+                    PARTITION BY cs.stage_code
+                    ORDER BY COALESCE(m.match_number, 9999), m.kickoff_at, m.match_id
+                  )::int AS stage_rank
+                FROM matches m
+                JOIN competition_stages cs ON cs.stage_id = m.stage_id
+                WHERE m.competition_season_id = cast(:sid as uuid)
+                """
+            ),
+            {"sid": competition_season_id},
+        )
+        rows = [dict(r._mapping) for r in result]
+
+        by_stage_and_number: dict[tuple[str, int], str] = {}
+        by_stage_and_rank: dict[tuple[str, int], str] = {}
+        for row in rows:
+            stage_code = str(row.get("stage_code") or "").upper()
+            if not stage_code:
+                continue
+            match_id = row.get("match_id")
+            if not match_id:
+                continue
+            match_number = row.get("match_number")
+            stage_rank = row.get("stage_rank")
+            if isinstance(match_number, int):
+                by_stage_and_number[(stage_code, match_number)] = match_id
+            if isinstance(stage_rank, int):
+                by_stage_and_rank[(stage_code, stage_rank)] = match_id
+
+        resolved: dict[str, str] = {}
+        for slot_code, (stage_code, rank) in stage_by_slot_code.items():
+            match_id = by_stage_and_number.get((stage_code, rank)) or by_stage_and_rank.get((stage_code, rank))
+            if match_id:
+                resolved[slot_code] = match_id
+        return resolved
+
+    @staticmethod
+    def _slot_stage_and_rank(slot_code: str) -> tuple[str, int] | None:
+        normalized = slot_code.strip().lower()
+        patterns: list[tuple[str, str]] = [
+            (r"^round_of_32_(\d+)_", "ROUND_OF_32"),
+            (r"^round_of_16_(\d+)_", "ROUND_OF_16"),
+            (r"^quarter_final_(\d+)_", "QUARTER_FINAL"),
+            (r"^quarterfinal_(\d+)_", "QUARTER_FINAL"),
+            (r"^semi_final_(\d+)_", "SEMI_FINAL"),
+            (r"^semifinal_(\d+)_", "SEMI_FINAL"),
+        ]
+        for pattern, stage_code in patterns:
+            match = re.match(pattern, normalized)
+            if not match:
+                continue
+            return stage_code, int(match.group(1))
+        return None

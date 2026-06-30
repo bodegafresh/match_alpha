@@ -49,3 +49,18 @@ def test_best_third_slot_not_in_active_matrix_stays_pending() -> None:
     assert resolution.status == SLOT_STATUS_PENDING_BEST_THIRD
     assert resolution.resolved_team_id is None
     assert resolution.reason == "slot_not_active_for_current_combination"
+
+
+def test_slot_stage_and_rank_parses_round_of_32() -> None:
+    parsed = TournamentSlotResolver._slot_stage_and_rank("round_of_32_4_winner")
+    assert parsed == ("ROUND_OF_32", 4)
+
+
+def test_slot_stage_and_rank_parses_quarterfinal_alias() -> None:
+    parsed = TournamentSlotResolver._slot_stage_and_rank("quarterfinal_2_winner")
+    assert parsed == ("QUARTER_FINAL", 2)
+
+
+def test_slot_stage_and_rank_returns_none_for_non_knockout_slot() -> None:
+    parsed = TournamentSlotResolver._slot_stage_and_rank("group_b_winner")
+    assert parsed is None
