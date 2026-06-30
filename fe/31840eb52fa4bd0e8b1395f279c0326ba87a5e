@@ -1,0 +1,26 @@
+app/competitions/service.py
+  s_26a64b4a3b48e0::t_d30de28a22eb70 652-653,675-682
+  s_26a64b4a3b48e0::t_bf5ba52678966b 565-566,579-580
+  s_26a64b4a3b48e0::t_565821071d2c30 818-895
+  s_26a64b4a3b48e0::t_7f7d351129c628 1007-1026
+app/api/routes/competitions.py
+  s_26a64b4a3b48e0::t_22cb4ee5c931ca 206-246,275-281,298,383-423,469-475,494
+app/api/routes/web.py
+  s_26a64b4a3b48e0::t_2f304d5ad5787e 707-708,718-722,724,728,730
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "fe31840eb52fa4bd0e8b1395f279c0326ba87a5e",
+  "prompts": {},
+  "sessions": {
+    "s_26a64b4a3b48e0": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "108db8a7-ebcd-4a3b-9973-0c1f8c2fff7b",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Marco Cerda <marco.cerda@mercadolibre.cl>"
+    }
+  }
+}
