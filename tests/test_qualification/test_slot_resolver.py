@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from app.services.qualification.slot_resolver import (
     SLOT_STATUS_PENDING_BEST_THIRD,
     TournamentSlotResolver,
@@ -64,3 +66,48 @@ def test_slot_stage_and_rank_parses_quarterfinal_alias() -> None:
 def test_slot_stage_and_rank_returns_none_for_non_knockout_slot() -> None:
     parsed = TournamentSlotResolver._slot_stage_and_rank("group_b_winner")
     assert parsed is None
+
+
+class _FakeResult:
+    def __init__(self, rows: Sequence[dict]) -> None:
+        self._rows = rows
+
+    def __iter__(self):
+        for row in self._rows:
+            yield type("Row", (), row)
+
+
+class _FakeConnForSourceMap:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, _query, _params):  # noqa: ANN001
+        self.calls += 1
+        if self.calls == 1:
+            return _FakeResult(
+                [
+                    {
+                        "slot_code": "round_of_32_4_winner",
+                        "source_match_id": "match-from-edges",
+                    }
+                ]
+            )
+        return _FakeResult([])
+
+
+def test_build_slot_source_match_map_prefers_edges_over_fallback() -> None:
+    resolver = TournamentSlotResolver(conn=_FakeConnForSourceMap())  # type: ignore[arg-type]
+    slots = [
+        {
+            "slot_type": "WINNER",
+            "slot_code": "round_of_32_4_winner",
+        }
+    ]
+
+    import asyncio
+
+    mapping = asyncio.get_event_loop().run_until_complete(
+        resolver._build_slot_source_match_map("season-1", slots)
+    )
+
+    assert mapping["round_of_32_4_winner"] == "match-from-edges"

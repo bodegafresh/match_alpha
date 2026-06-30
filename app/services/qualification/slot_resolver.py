@@ -97,6 +97,11 @@ class TournamentSlotResolver:
                         slot["tournament_slot_id"],
                         expected_source_match_id,
                     )
+                    # Previous resolved team may belong to the old source match.
+                    # Clear it immediately to avoid stale bracket participants.
+                    await self._clear_slot(slot)
+                    await self._clear_match_participants(slot)
+                    slot["resolved_team_id"] = None
                     slot["source_match_id"] = expected_source_match_id
 
             # For already-resolved BEST_THIRD slots:
@@ -677,17 +682,48 @@ class TournamentSlotResolver:
         Derive source match for WINNER/LOSER slots from slot_code and current stage match numbering.
         This heals stale mappings in tournament_slots.source_match_id when fixture ordering changes.
         """
+        # 1) Primary source: bracket topology (knockout_bracket_edges), which is deterministic.
+        edge_result = await self.conn.execute(
+            text(
+                """
+                SELECT
+                    ts.slot_code,
+                    kbe.from_match_id::text AS source_match_id
+                FROM tournament_slots ts
+                JOIN match_participants mp
+                    ON mp.tournament_slot_id = ts.tournament_slot_id
+                JOIN matches to_match
+                    ON to_match.match_id = mp.match_id
+                 AND to_match.competition_season_id = cast(:sid as uuid)
+                JOIN knockout_bracket_edges kbe
+                    ON kbe.to_match_id = mp.match_id
+                 AND kbe.to_side = mp.side
+                 AND kbe.outcome = coalesce(ts.metadata->>'outcome', ts.slot_type)
+                WHERE ts.competition_season_id = cast(:sid as uuid)
+                    AND ts.slot_type IN ('WINNER', 'LOSER')
+                """
+            ),
+            {"sid": competition_season_id},
+        )
+        resolved_from_edges: dict[str, str] = {
+            str(r.slot_code): str(r.source_match_id)
+            for r in edge_result
+            if r.slot_code and r.source_match_id
+        }
+
         stage_by_slot_code: dict[str, tuple[str, int]] = {}
         for slot in slots:
             if slot.get("slot_type") not in {"WINNER", "LOSER"}:
                 continue
             slot_code = str(slot.get("slot_code") or "")
+            if slot_code in resolved_from_edges:
+                continue
             parsed = self._slot_stage_and_rank(slot_code)
             if parsed:
                 stage_by_slot_code[slot_code] = parsed
 
         if not stage_by_slot_code:
-            return {}
+            return resolved_from_edges
 
         result = await self.conn.execute(
             text(
@@ -725,7 +761,7 @@ class TournamentSlotResolver:
             if isinstance(stage_rank, int):
                 by_stage_and_rank[(stage_code, stage_rank)] = match_id
 
-        resolved: dict[str, str] = {}
+        resolved: dict[str, str] = dict(resolved_from_edges)
         for slot_code, (stage_code, rank) in stage_by_slot_code.items():
             match_id = by_stage_and_number.get((stage_code, rank)) or by_stage_and_rank.get((stage_code, rank))
             if match_id:
