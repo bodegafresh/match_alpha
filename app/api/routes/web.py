@@ -704,7 +704,8 @@ async def web_teams(
 
 @router.get("/team-detail")
 async def web_team_detail(
-    team_slug: str = Query(...),
+    team_slug: str | None = Query(default=None),
+    team_id: str | None = Query(default=None),
     season: str | None = None,
     lang: str | None = Query(default=None),
     timezone: str | None = Query(default=None),
@@ -714,14 +715,19 @@ async def web_team_detail(
     repo = PublishedRepository(conn)
     season_slug = season or get_settings().default_season_slug
     preferred_lang = _resolve_lang(lang, timezone, accept_language)
+    if not team_slug and not team_id:
+        return {"ok": True, "data": {"team": None, "matches": [], "roster": [], "generated_at": iso_utc()}}
+
+    where_clause = "where t.slug = :team_slug" if team_slug else "where t.team_id = cast(:team_id as uuid)"
+    params = {"team_slug": team_slug} if team_slug else {"team_id": team_id}
     team = await repo.fetch_one(
-        """
+        f"""
         select t.*, c.flag_emoji, c.fifa_code as country_fifa_code
         from teams t
         left join countries c on c.code_alpha2 = t.country_code
-        where t.slug = :team_slug
+        {where_clause}
         """,
-        {"team_slug": team_slug},
+        params,
     )
     if not team:
         return {"ok": True, "data": {"team": None, "matches": [], "roster": [], "generated_at": iso_utc()}}

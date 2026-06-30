@@ -562,6 +562,8 @@ def _normalize_espn_event(event: dict[str, Any]) -> dict[str, Any]:
         or ""
     )
     group_text = ((event.get("group") or {}).get("name")) or ((event.get("group") or {}).get("shortName")) or stage_text
+    penalties = _extract_espn_penalties(home, away, status_payload, status_type)
+    status_detail = status_payload.get("detail") or status_payload.get("shortDetail") or status_type.get("detail") or status_type.get("shortDetail")
     return {
         "source": "ESPN",
         "source_match_id": str(event.get("id") or ""),
@@ -574,6 +576,8 @@ def _normalize_espn_event(event: dict[str, Any]) -> dict[str, Any]:
         "away": _normalize_espn_team(away),
         "home_score": _espn_competitor_total_score(home),
         "away_score": _espn_competitor_total_score(away),
+        "status_detail": status_detail,
+        "penalties": penalties,
         "venue": {
             "source_venue_id": str(venue.get("id") or ""),
             "display_name": venue.get("fullName") or venue.get("name"),
@@ -645,6 +649,8 @@ async def _promote_normalized_match(conn: AsyncConnection, season: dict[str, Any
     home_team_id = match.get("home_team_id")
     away_team_id = match.get("away_team_id")
     winner_team_id = _winner_team_id(home_team_id, away_team_id, home_score, away_score, normalized.get("status"))
+    if winner_team_id is None and normalized.get("status") == "FINISHED" and home_score is not None and away_score is not None and home_score == away_score:
+        winner_team_id = _winner_from_penalties(normalized, home_team_id, away_team_id)
     await conn.execute(
         text(
             """
@@ -666,7 +672,14 @@ async def _promote_normalized_match(conn: AsyncConnection, season: dict[str, Any
             "home_score": home_score,
             "away_score": away_score,
             "winner_team_id": winner_team_id,
-            "metadata": _json({"source": normalized["source"], "source_match_name": normalized.get("source_match_name")}),
+            "metadata": _json(
+                {
+                    "source": normalized["source"],
+                    "source_match_name": normalized.get("source_match_name"),
+                    "status_detail": normalized.get("status_detail"),
+                    "penalties": normalized.get("penalties"),
+                }
+            ),
         },
     )
     await _update_participant_score(conn, match["match_id"], "HOME", home_score)
@@ -802,7 +815,84 @@ async def _upsert_match_external_ref(conn: AsyncConnection, match_id: str, norma
 def _normalize_espn_team(competitor: dict[str, Any]) -> dict[str, Any]:
     team = competitor.get("team") or competitor
     name = team.get("displayName") or team.get("name") or competitor.get("displayName") or competitor.get("name") or ""
-    return {"display_name": name, "source_team_id": str(team.get("id") or competitor.get("id") or ""), "payload": competitor}
+    return {
+        "display_name": name,
+        "source_team_id": str(team.get("id") or competitor.get("id") or ""),
+        "is_winner": bool(competitor.get("winner")),
+        "payload": competitor,
+    }
+
+
+def _extract_espn_penalties(
+    home: dict[str, Any],
+    away: dict[str, Any],
+    status: dict[str, Any],
+    status_type: dict[str, Any],
+) -> dict[str, Any] | None:
+    def _pen_from_competitor(competitor: dict[str, Any]) -> int | None:
+        direct_candidates = (
+            competitor.get("shootoutScore"),
+            competitor.get("penaltyScore"),
+            competitor.get("penalties"),
+            competitor.get("shootout"),
+        )
+        for value in direct_candidates:
+            parsed = _score(value)
+            if parsed is not None:
+                return parsed
+
+        for line in competitor.get("linescores") or []:
+            if not isinstance(line, dict):
+                continue
+            marker_parts = [
+                line.get("period"),
+                line.get("displayValue"),
+                line.get("label"),
+                line.get("abbreviation"),
+                line.get("description"),
+                line.get("type"),
+            ]
+            marker = " ".join(str(value) for value in marker_parts if value).upper()
+            if not any(token in marker for token in ("PEN", "SHOOT", "PENA", "TIEBREAKER")):
+                continue
+            for key in ("value", "displayValue", "score"):
+                parsed = _score(line.get(key))
+                if parsed is not None:
+                    return parsed
+        return None
+
+    home_pen = _pen_from_competitor(home)
+    away_pen = _pen_from_competitor(away)
+
+    status_text = " ".join(
+        str(value)
+        for value in (
+            status.get("detail"),
+            status.get("shortDetail"),
+            status_type.get("detail"),
+            status_type.get("shortDetail"),
+            status_type.get("description"),
+            status_type.get("name"),
+        )
+        if value
+    ).upper()
+    decided_by_penalties = any(token in status_text for token in ("PEN", "PENAL", "SHOOTOUT"))
+
+    winner_side = None
+    if bool(home.get("winner")) and not bool(away.get("winner")):
+        winner_side = "HOME"
+    elif bool(away.get("winner")) and not bool(home.get("winner")):
+        winner_side = "AWAY"
+
+    if home_pen is None and away_pen is None and not decided_by_penalties and winner_side is None:
+        return None
+
+    return {
+        "home": home_pen,
+        "away": away_pen,
+        "winner_side": winner_side,
+        "decided_by_penalties": decided_by_penalties or (home_pen is not None and away_pen is not None),
+    }
 
 
 def _normalize_football_data_team(team: dict[str, Any]) -> dict[str, Any]:
@@ -910,6 +1000,26 @@ def _winner_team_id(home_team_id: str | None, away_team_id: str | None, home_sco
     if home_score > away_score:
         return home_team_id
     if away_score > home_score:
+        return away_team_id
+    return None
+
+
+def _winner_from_penalties(normalized: dict[str, Any], home_team_id: str | None, away_team_id: str | None) -> str | None:
+    penalties = normalized.get("penalties") if isinstance(normalized.get("penalties"), dict) else None
+    if not penalties:
+        return None
+    winner_side = str(penalties.get("winner_side") or "").upper()
+    if winner_side == "HOME":
+        return home_team_id
+    if winner_side == "AWAY":
+        return away_team_id
+    home_pen = _score(penalties.get("home"))
+    away_pen = _score(penalties.get("away"))
+    if home_pen is None or away_pen is None:
+        return None
+    if home_pen > away_pen:
+        return home_team_id
+    if away_pen > home_pen:
         return away_team_id
     return None
 

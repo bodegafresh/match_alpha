@@ -203,6 +203,47 @@ async def competition_standings_global(
                     join teams t on t.team_id = cte.team_id
                     left join countries c on c.code_alpha2 = t.country_code
                 ),
+                season_team_results as (
+                    select
+                        mp.team_id::text as team_id,
+                        count(*)::int as played,
+                        count(*) filter (
+                            where m.winner_team_id is not null and m.winner_team_id = mp.team_id
+                        )::int as wins,
+                        count(*) filter (
+                            where m.winner_team_id is null and coalesce(m.home_score, -1) = coalesce(m.away_score, -2)
+                        )::int as draws,
+                        count(*) filter (
+                            where m.winner_team_id is not null and m.winner_team_id <> mp.team_id
+                        )::int as losses,
+                        coalesce(
+                            sum(
+                                case
+                                    when mp.side = 'HOME' then m.home_score
+                                    when mp.side = 'AWAY' then m.away_score
+                                    else 0
+                                end
+                            ),
+                            0
+                        )::int as goals_for,
+                        coalesce(
+                            sum(
+                                case
+                                    when mp.side = 'HOME' then m.away_score
+                                    when mp.side = 'AWAY' then m.home_score
+                                    else 0
+                                end
+                            ),
+                            0
+                        )::int as goals_against
+                    from season s
+                    join matches m on m.competition_season_id = s.competition_season_id
+                    join match_participants mp on mp.match_id = m.match_id and mp.team_id is not null
+                    where m.status = 'FINISHED'
+                      and m.home_score is not null
+                      and m.away_score is not null
+                    group by mp.team_id
+                ),
                 latest as (
                     select distinct on (st.team_id)
                         st.team_id::text as team_id,
@@ -231,13 +272,13 @@ async def competition_standings_global(
                     select
                         e.*,
                         l.stage_position,
-                        l.played,
-                        l.wins,
-                        l.draws,
-                        l.losses,
-                        l.goals_for,
-                        l.goals_against,
-                        l.goal_difference,
+                        coalesce(sr.played, l.played, 0) as played,
+                        coalesce(sr.wins, l.wins, 0) as wins,
+                        coalesce(sr.draws, l.draws, 0) as draws,
+                        coalesce(sr.losses, l.losses, 0) as losses,
+                        coalesce(sr.goals_for, l.goals_for, 0) as goals_for,
+                        coalesce(sr.goals_against, l.goals_against, 0) as goals_against,
+                        coalesce(sr.goals_for, l.goals_for, 0) - coalesce(sr.goals_against, l.goals_against, 0) as goal_difference,
                         l.points,
                         l.qualification_status,
                         l.group_code,
@@ -254,6 +295,7 @@ async def competition_standings_global(
                         ) as global_position
                     from entries e
                     left join latest l on l.team_id = e.team_id
+                    left join season_team_results sr on sr.team_id = e.team_id
                 )
                 select *
                 from ranked
@@ -338,6 +380,47 @@ async def competition_teams_catalog(
                     join teams t on t.team_id = cte.team_id
                     left join countries c on c.code_alpha2 = t.country_code
                 ),
+                season_team_results as (
+                    select
+                        mp.team_id::text as team_id,
+                        count(*)::int as played,
+                        count(*) filter (
+                            where m.winner_team_id is not null and m.winner_team_id = mp.team_id
+                        )::int as wins,
+                        count(*) filter (
+                            where m.winner_team_id is null and coalesce(m.home_score, -1) = coalesce(m.away_score, -2)
+                        )::int as draws,
+                        count(*) filter (
+                            where m.winner_team_id is not null and m.winner_team_id <> mp.team_id
+                        )::int as losses,
+                        coalesce(
+                            sum(
+                                case
+                                    when mp.side = 'HOME' then m.home_score
+                                    when mp.side = 'AWAY' then m.away_score
+                                    else 0
+                                end
+                            ),
+                            0
+                        )::int as goals_for,
+                        coalesce(
+                            sum(
+                                case
+                                    when mp.side = 'HOME' then m.away_score
+                                    when mp.side = 'AWAY' then m.home_score
+                                    else 0
+                                end
+                            ),
+                            0
+                        )::int as goals_against
+                    from season s
+                    join matches m on m.competition_season_id = s.competition_season_id
+                    join match_participants mp on mp.match_id = m.match_id and mp.team_id is not null
+                    where m.status = 'FINISHED'
+                      and m.home_score is not null
+                      and m.away_score is not null
+                    group by mp.team_id
+                ),
                 latest_standings as (
                     select distinct on (st.team_id)
                         st.team_id::text as team_id,
@@ -383,13 +466,13 @@ async def competition_teams_catalog(
                 select
                     e.*,
                     ls.stage_position,
-                    ls.played,
-                    ls.wins,
-                    ls.draws,
-                    ls.losses,
-                    ls.goals_for,
-                    ls.goals_against,
-                    ls.goal_difference,
+                    coalesce(sr.played, ls.played, 0) as played,
+                    coalesce(sr.wins, ls.wins, 0) as wins,
+                    coalesce(sr.draws, ls.draws, 0) as draws,
+                    coalesce(sr.losses, ls.losses, 0) as losses,
+                    coalesce(sr.goals_for, ls.goals_for, 0) as goals_for,
+                    coalesce(sr.goals_against, ls.goals_against, 0) as goals_against,
+                    coalesce(sr.goals_for, ls.goals_for, 0) - coalesce(sr.goals_against, ls.goals_against, 0) as goal_difference,
                     ls.points,
                     ls.qualification_status,
                     ls.group_code,
@@ -408,6 +491,7 @@ async def competition_teams_catalog(
                     ) as global_position
                 from entries e
                 left join latest_standings ls on ls.team_id = e.team_id
+                left join season_team_results sr on sr.team_id = e.team_id
                 left join latest_elo le on le.team_id = e.team_id
                 left join roster r on r.team_id = e.team_id
                 """,
